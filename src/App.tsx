@@ -85,6 +85,7 @@ export default function App() {
     ok: boolean;
     message: string;
   } | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
 
   const refreshConfig = useCallback(async () => {
     const cfg = await fetchPublicAppConfig();
@@ -208,17 +209,32 @@ export default function App() {
     setExportedVideo(null);
   };
 
+  const getSafeVideoFilename = (result: ExportVideoResult) => {
+    const slug = selectedTemplate.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    return `ReelCraft-${slug || 'status'}.${result.extension}`;
+  };
+
   const triggerBrowserDownload = (result: ExportVideoResult) => {
-    const filename = `ReelCraft-${selectedTemplate.name.toLowerCase().replace(/\s+/g, '-')}.${result.extension}`;
+    const filename = getSafeVideoFilename(result);
+    // Use application/octet-stream to force file download instead of inline video preview on mobile/Safari
+    const downloadBlob = new Blob([result.blob], { type: 'application/octet-stream' });
+    const downloadUrl = URL.createObjectURL(downloadBlob);
     const link = document.createElement('a');
-    link.href = result.url;
+    link.href = downloadUrl;
     link.download = filename;
+    link.rel = 'noopener';
     link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
     window.setTimeout(() => {
       document.body.removeChild(link);
-    }, 150);
+    }, 250);
+    window.setTimeout(() => {
+      URL.revokeObjectURL(downloadUrl);
+    }, 60_000);
   };
 
   const runMp4EncodeAndDownload = async () => {
@@ -230,6 +246,7 @@ export default function App() {
     setAwaitingAdConfirm(false);
     setExportError(null);
     setTelegramSendStatus(null);
+    setDownloadNotice(null);
     setIsExporting(true);
     setExportProgress(0);
     setExportedVideo(null);
@@ -256,7 +273,9 @@ export default function App() {
 
       setExportedVideo(result);
       haptic('success');
-      triggerBrowserDownload(result);
+      if (!tgContext.isTelegram) {
+        triggerBrowserDownload(result);
+      }
     } catch (err) {
       if (err instanceof Error && err.message !== 'Export cancelled') {
         setExportError(err.message || 'Could not prepare MP4 on this device.');
@@ -364,33 +383,86 @@ export default function App() {
     }
   };
 
-  const nativeShareSupported = useMemo(
-    () => typeof navigator !== 'undefined' && typeof navigator.share === 'function',
-    []
-  );
+  const nativeShareSupported = useMemo(() => {
+    if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+      return false;
+    }
+    if (typeof navigator.canShare === 'function' && typeof File !== 'undefined') {
+      try {
+        const probe = new File([new Uint8Array(1)], 'reel.mp4', { type: 'video/mp4' });
+        return navigator.canShare({ files: [probe] });
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }, []);
 
   const handleNativeShare = async () => {
     if (!exportedVideo) return;
     try {
-      const file = new File(
-        [exportedVideo.blob],
-        `ReelCraft-${selectedTemplate.id}.${exportedVideo.extension}`,
-        { type: exportedVideo.mimeType }
-      );
+      const file = new File([exportedVideo.blob], getSafeVideoFilename(exportedVideo), {
+        type: exportedVideo.mimeType || 'video/mp4',
+      });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
           title: title.trim() || selectedTemplate.name,
         });
-      } else {
-        await navigator.share({
-          title: title.trim() || selectedTemplate.name,
-          url: window.location.origin,
-        });
       }
     } catch {
       // User dismissed share sheet
     }
+  };
+
+  const handleDirectDownload = async () => {
+    if (!exportedVideo) return;
+    haptic('light');
+    setDownloadNotice(null);
+
+    const file = new File([exportedVideo.blob], getSafeVideoFilename(exportedVideo), {
+      type: exportedVideo.mimeType || 'video/mp4',
+    });
+
+    // Inside Telegram Mini App, Android/iOS WebViews block <a href="blob:..." download>.
+    // Use native OS Share/Save sheet when available, otherwise deliver straight to Telegram Chat.
+    if (tgContext.isTelegram) {
+      if (
+        typeof navigator !== 'undefined' &&
+        typeof navigator.share === 'function' &&
+        typeof navigator.canShare === 'function' &&
+        navigator.canShare({ files: [file] })
+      ) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: title.trim() || selectedTemplate.name,
+          });
+          return;
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            return;
+          }
+        }
+      }
+
+      if (telegramSendStatus?.ok) {
+        setDownloadNotice(
+          'Already sent to your Telegram chat — open the chat to save to your gallery.'
+        );
+        return;
+      }
+
+      setDownloadNotice(
+        'Telegram blocks direct browser downloads — sending your MP4 to your Telegram chat so you can save it to Gallery.'
+      );
+      await handleSendToTelegramChat();
+      return;
+    }
+
+    // Standard mobile & desktop browsers
+    triggerBrowserDownload(exportedVideo);
+    setDownloadNotice('Download started — check your browser Downloads folder.');
   };
 
   if (isAdminRoute) {
@@ -680,6 +752,7 @@ export default function App() {
         open={downloadModalOpen}
         templateName={selectedTemplate.name}
         adProviderLabel={adProviderNames[appConfig.ad_provider]}
+        isTelegram={tgContext.isTelegram}
         awaitingAdConfirm={awaitingAdConfirm}
         isRunningAd={isRunningAd}
         isExporting={isExporting}
@@ -688,8 +761,10 @@ export default function App() {
         exportedVideo={exportedVideo}
         isSendingTelegram={isSendingTelegram}
         telegramSendStatus={telegramSendStatus}
+        downloadNotice={downloadNotice}
         nativeShareSupported={nativeShareSupported}
         onConfirmWatchAd={handleConfirmWatchAd}
+        onDirectDownload={handleDirectDownload}
         onRetry={() => {
           setExportedVideo(null);
           handleDownloadVideoClick();
@@ -697,6 +772,7 @@ export default function App() {
         onCancelExport={() => exportAbortRef.current?.abort()}
         onClose={() => {
           setAwaitingAdConfirm(false);
+          setDownloadNotice(null);
           setDownloadModalOpen(false);
         }}
         onSendToTelegramChat={handleSendToTelegramChat}

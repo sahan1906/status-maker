@@ -7,6 +7,7 @@ interface TelegramUser {
 
 interface TelegramWebApp {
   initData?: string;
+  platform?: string;
   initDataUnsafe?: {
     user?: TelegramUser;
   };
@@ -51,8 +52,9 @@ export function initTelegramApp(): TelegramContextInfo {
   }
 
   const user = tg.initDataUnsafe?.user;
+  const hasTelegramPlatform = Boolean(tg.platform && tg.platform !== 'unknown');
   return {
-    isTelegram: Boolean(tg.initData || user),
+    isTelegram: Boolean(tg.initData || user || hasTelegramPlatform),
     initData: tg.initData || '',
     userId: user?.id ? String(user.id) : '',
     username: user?.username || user?.first_name || '',
