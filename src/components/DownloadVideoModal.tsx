@@ -2,6 +2,7 @@ import {
   CheckCircle2,
   Download,
   Loader2,
+  PlayCircle,
   Send,
   Share2,
   X,
@@ -12,6 +13,7 @@ interface DownloadVideoModalProps {
   open: boolean;
   templateName: string;
   adProviderLabel: string;
+  awaitingAdConfirm: boolean;
   isRunningAd: boolean;
   isExporting: boolean;
   exportProgress: number;
@@ -20,6 +22,7 @@ interface DownloadVideoModalProps {
   isSendingTelegram: boolean;
   telegramSendStatus: { ok: boolean; message: string } | null;
   nativeShareSupported: boolean;
+  onConfirmWatchAd: () => void;
   onRetry: () => void;
   onCancelExport: () => void;
   onClose: () => void;
@@ -31,6 +34,7 @@ export function DownloadVideoModal({
   open,
   templateName,
   adProviderLabel,
+  awaitingAdConfirm,
   isRunningAd,
   isExporting,
   exportProgress,
@@ -39,6 +43,7 @@ export function DownloadVideoModal({
   isSendingTelegram,
   telegramSendStatus,
   nativeShareSupported,
+  onConfirmWatchAd,
   onRetry,
   onCancelExport,
   onClose,
@@ -84,14 +89,46 @@ export function DownloadVideoModal({
           </button>
         </div>
 
+        {/* State 0: Watch Ad to Download Gate */}
+        {awaitingAdConfirm && !isRunningAd && !isExporting && !exportedVideo && (
+          <div className="space-y-4">
+            <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-1.5">
+              <p className="text-sm font-semibold text-white">
+                Watch a short ad to download
+              </p>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Watch a quick {adProviderLabel} ad to unlock your free HD 9:16 MP4 video. Download starts automatically right after the ad finishes.
+              </p>
+            </div>
+
+            {exportError && (
+              <div
+                role="alert"
+                className="rounded-xl bg-amber-500/10 border border-amber-500/25 px-4 py-2.5 text-xs text-amber-200"
+              >
+                {exportError}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={onConfirmWatchAd}
+              className="min-h-[50px] w-full px-4 py-3 text-sm font-semibold rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 active:scale-[0.99] flex items-center justify-center gap-2 transition"
+            >
+              <PlayCircle className="w-4 h-4" />
+              <span>Watch Ad &amp; Download</span>
+            </button>
+          </div>
+        )}
+
         {/* State 1: Rewarded Ad running */}
         {isRunningAd && (
           <div className="rounded-xl bg-[#08080A] border border-white/10 p-5 flex items-center gap-3">
             <Loader2 className="w-5 h-5 text-white animate-spin shrink-0" />
             <div>
-              <p className="text-sm font-semibold text-white">Loading short sponsored video...</p>
+              <p className="text-sm font-semibold text-white">Opening {adProviderLabel} ad...</p>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Your HD video starts preparing right after the {adProviderLabel} ad.
+                Your HD video will download automatically as soon as the ad completes.
               </p>
             </div>
           </div>
@@ -130,8 +167,8 @@ export function DownloadVideoModal({
           </div>
         )}
 
-        {/* State 3: Error */}
-        {exportError && !isExporting && !isRunningAd && (
+        {/* State 3: Error (when not on the ad confirmation screen) */}
+        {exportError && !awaitingAdConfirm && !isExporting && !isRunningAd && (
           <div className="space-y-3">
             <div
               role="alert"
@@ -171,7 +208,7 @@ export function DownloadVideoModal({
                   {(exportedVideo.blob.size / (1024 * 1024)).toFixed(2)} MB
                 </p>
                 <p className="text-xs text-zinc-400">
-                  Send to Telegram chat or download straight to your gallery.
+                  Your download started. You can also send it to Telegram chat or save again below.
                 </p>
               </div>
             </div>
@@ -214,7 +251,7 @@ export function DownloadVideoModal({
                   }`}
                 >
                   <Download className="w-4 h-4" />
-                  <span>Download Video</span>
+                  <span>Download Again</span>
                 </a>
 
                 {nativeShareSupported && (

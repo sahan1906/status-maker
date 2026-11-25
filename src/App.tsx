@@ -72,6 +72,7 @@ export default function App() {
 
   // Download Video Sheet state
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [awaitingAdConfirm, setAwaitingAdConfirm] = useState(false);
   const [isRunningAd, setIsRunningAd] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -207,35 +208,28 @@ export default function App() {
     setExportedVideo(null);
   };
 
-  const handleDownloadVideoClick = async () => {
-    setDownloadModalOpen(true);
+  const triggerBrowserDownload = (result: ExportVideoResult) => {
+    const filename = `ReelCraft-${selectedTemplate.name.toLowerCase().replace(/\s+/g, '-')}.${result.extension}`;
+    const link = document.createElement('a');
+    link.href = result.url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    window.setTimeout(() => {
+      document.body.removeChild(link);
+    }, 150);
+  };
 
-    // If current edit is already rendered and ready, reopen the ready sheet immediately
-    if (exportedVideo && !isExporting && !isRunningAd) {
-      return;
-    }
-
+  const runMp4EncodeAndDownload = async () => {
     if (decodedFrames.length === 0) {
       setExportError('Wait a moment for your photos to finish loading.');
       return;
     }
 
+    setAwaitingAdConfirm(false);
     setExportError(null);
     setTelegramSendStatus(null);
-    haptic('medium');
-
-    // Step A: Trigger configured Rewarded Ad (skips automatically if disabled/unconfigured)
-    if (shouldTriggerRewardAd(appConfig)) {
-      setIsRunningAd(true);
-      const adResult = await runRewardedAd(appConfig);
-      setIsRunningAd(false);
-      if (adResult === 'cancelled') {
-        setExportError('Watch the short sponsored video to unlock HD download.');
-        return;
-      }
-    }
-
-    // Step B: Client-side 720x1280 30fps H.264 MP4 encoding
     setIsExporting(true);
     setExportProgress(0);
     setExportedVideo(null);
@@ -262,6 +256,7 @@ export default function App() {
 
       setExportedVideo(result);
       haptic('success');
+      triggerBrowserDownload(result);
     } catch (err) {
       if (err instanceof Error && err.message !== 'Export cancelled') {
         setExportError(err.message || 'Could not prepare MP4 on this device.');
@@ -270,6 +265,53 @@ export default function App() {
       setIsExporting(false);
       exportAbortRef.current = null;
     }
+  };
+
+  const handleConfirmWatchAd = async () => {
+    setExportError(null);
+    setTelegramSendStatus(null);
+    haptic('medium');
+
+    if (shouldTriggerRewardAd(appConfig)) {
+      setIsRunningAd(true);
+      const adResult = await runRewardedAd(appConfig);
+      setIsRunningAd(false);
+      if (adResult === 'cancelled') {
+        setAwaitingAdConfirm(true);
+        setExportError('Please watch the full ad to unlock your HD video download.');
+        return;
+      }
+    }
+
+    await runMp4EncodeAndDownload();
+  };
+
+  const handleDownloadVideoClick = async () => {
+    setDownloadModalOpen(true);
+
+    // If current edit is already rendered and ready, reopen the ready sheet immediately
+    if (exportedVideo && !isExporting && !isRunningAd) {
+      return;
+    }
+
+    if (decodedFrames.length === 0) {
+      setAwaitingAdConfirm(false);
+      setExportError('Wait a moment for your photos to finish loading.');
+      return;
+    }
+
+    setExportError(null);
+    setTelegramSendStatus(null);
+    haptic('medium');
+
+    // If AdsGram / rewarded ad is enabled in Admin, show "Watch Ad to Download" prompt first
+    if (shouldTriggerRewardAd(appConfig)) {
+      setAwaitingAdConfirm(true);
+      return;
+    }
+
+    // Otherwise encode & download right away
+    await runMp4EncodeAndDownload();
   };
 
   const handleSendToTelegramChat = async () => {
@@ -448,16 +490,20 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Zone 3: Single Primary Action — Download Video */}
+          {/* Zone 3: Download Video (Photos Edit only — never shown on Templates tab) */}
           <div className="shrink-0">
-            <button
-              type="button"
-              onClick={handleDownloadVideoClick}
-              className="min-h-[40px] px-4 py-2 text-xs font-semibold rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 active:scale-[0.98] flex items-center gap-1.5 transition whitespace-nowrap shrink-0"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download Video</span>
-            </button>
+            {view === 'edit' ? (
+              <button
+                type="button"
+                onClick={handleDownloadVideoClick}
+                className="min-h-[40px] px-4 py-2 text-xs font-semibold rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 active:scale-[0.98] flex items-center gap-1.5 transition whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download Video</span>
+              </button>
+            ) : (
+              <div className="w-2" aria-hidden="true" />
+            )}
           </div>
         </div>
       </header>
@@ -629,11 +675,12 @@ export default function App() {
         </nav>
       )}
 
-      {/* Download Video Sheet (Ad Gate → HD MP4 Encode → Send to Telegram / Download) */}
+      {/* Download Video Sheet (Watch Ad Prompt → Ad → HD MP4 Auto-Download / Send to Telegram) */}
       <DownloadVideoModal
         open={downloadModalOpen}
         templateName={selectedTemplate.name}
         adProviderLabel={adProviderNames[appConfig.ad_provider]}
+        awaitingAdConfirm={awaitingAdConfirm}
         isRunningAd={isRunningAd}
         isExporting={isExporting}
         exportProgress={exportProgress}
@@ -642,12 +689,16 @@ export default function App() {
         isSendingTelegram={isSendingTelegram}
         telegramSendStatus={telegramSendStatus}
         nativeShareSupported={nativeShareSupported}
+        onConfirmWatchAd={handleConfirmWatchAd}
         onRetry={() => {
           setExportedVideo(null);
           handleDownloadVideoClick();
         }}
         onCancelExport={() => exportAbortRef.current?.abort()}
-        onClose={() => setDownloadModalOpen(false)}
+        onClose={() => {
+          setAwaitingAdConfirm(false);
+          setDownloadModalOpen(false);
+        }}
         onSendToTelegramChat={handleSendToTelegramChat}
         onNativeShare={handleNativeShare}
       />
