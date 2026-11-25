@@ -1,0 +1,6 @@
+{
+  "name": "UtsavReel — Status Video Maker",
+  "description": "Turn family photos into festive vertical WhatsApp Status videos with Indian templates, music, and smooth transitions — 100% client-side for Telegram Mini Apps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

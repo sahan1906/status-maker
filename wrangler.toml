@@ -1,0 +1,10 @@
+name = "reelcraft"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "dist"
+
+# Bind your Cloudflare D1 database in Cloudflare Pages -> Settings -> Functions -> D1 database bindings
+# Binding name MUST be: DB
+[[d1_databases]]
+binding = "DB"
+database_name = "reelcraft-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
