@@ -21,6 +21,7 @@ interface DownloadVideoModalProps {
   exportError: string | null;
   exportedVideo: ExportVideoResult | null;
   isSendingTelegram: boolean;
+  isPreparingDownload: boolean;
   telegramSendStatus: { ok: boolean; message: string } | null;
   downloadNotice: string | null;
   nativeShareSupported: boolean;
@@ -45,6 +46,7 @@ export function DownloadVideoModal({
   exportError,
   exportedVideo,
   isSendingTelegram,
+  isPreparingDownload,
   telegramSendStatus,
   downloadNotice,
   nativeShareSupported,
@@ -254,13 +256,17 @@ export function DownloadVideoModal({
                 <button
                   type="button"
                   onClick={onDirectDownload}
-                  disabled={isSendingTelegram}
+                  disabled={isSendingTelegram || isPreparingDownload}
                   className={`min-h-[46px] w-full px-4 py-2 text-xs font-semibold rounded-xl bg-white/[0.08] border border-white/15 text-white hover:bg-white/[0.14] active:scale-[0.99] disabled:opacity-50 flex items-center justify-center gap-1.5 transition whitespace-nowrap ${
                     nativeShareSupported ? '' : 'sm:col-span-2'
                   }`}
                 >
-                  <Download className="w-4 h-4" />
-                  <span>{isTelegram ? 'Save / Download Video' : 'Download Video'}</span>
+                  {isPreparingDownload ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  <span>{isPreparingDownload ? 'Preparing Download...' : 'Download Video'}</span>
                 </button>
 
                 {nativeShareSupported && (

@@ -20,7 +20,12 @@ import {
   runRewardedAd,
   shouldTriggerRewardAd,
 } from './lib/adNetworks';
-import { haptic, initTelegramApp, TelegramContextInfo } from './lib/telegram';
+import {
+  haptic,
+  initTelegramApp,
+  TelegramContextInfo,
+  triggerTelegramNativeDownload,
+} from './lib/telegram';
 import {
   exportReelMp4,
   ExportVideoResult,
@@ -81,11 +86,13 @@ export default function App() {
   const exportAbortRef = useRef<AbortController | null>(null);
 
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
+  const [isPreparingDownload, setIsPreparingDownload] = useState(false);
   const [telegramSendStatus, setTelegramSendStatus] = useState<{
     ok: boolean;
     message: string;
   } | null>(null);
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
+  const preparedDownloadRef = useRef<{ url: string; fileName: string } | null>(null);
 
   const refreshConfig = useCallback(async () => {
     const cfg = await fetchPublicAppConfig();
@@ -126,6 +133,7 @@ export default function App() {
   }, [photos]);
 
   useEffect(() => {
+    preparedDownloadRef.current = null;
     return () => {
       if (exportedVideo?.url) {
         URL.revokeObjectURL(exportedVideo.url);
@@ -420,43 +428,73 @@ export default function App() {
     haptic('light');
     setDownloadNotice(null);
 
-    const file = new File([exportedVideo.blob], getSafeVideoFilename(exportedVideo), {
-      type: exportedVideo.mimeType || 'video/mp4',
-    });
+    const fileName = getSafeVideoFilename(exportedVideo);
 
-    // Inside Telegram Mini App, Android/iOS WebViews block <a href="blob:..." download>.
-    // Use native OS Share/Save sheet when available, otherwise deliver straight to Telegram Chat.
+    // Inside Telegram Mini App, WebViews block <a href="blob:..." download>.
+    // Prepare a short-lived signed HTTPS download URL and trigger Telegram's native downloadFile API
+    // (or external browser download fallback on older Telegram clients).
     if (tgContext.isTelegram) {
-      if (
-        typeof navigator !== 'undefined' &&
-        typeof navigator.share === 'function' &&
-        typeof navigator.canShare === 'function' &&
-        navigator.canShare({ files: [file] })
-      ) {
-        try {
-          await navigator.share({
-            files: [file],
-            title: title.trim() || selectedTemplate.name,
-          });
+      if (preparedDownloadRef.current) {
+        const mode = triggerTelegramNativeDownload(
+          preparedDownloadRef.current.url,
+          preparedDownloadRef.current.fileName
+        );
+        if (mode !== 'unsupported') {
+          setDownloadNotice(
+            mode === 'native-dialog'
+              ? 'Tap Download in the Telegram popup to save the MP4 to your device.'
+              : 'Opening direct MP4 download in your browser...'
+          );
           return;
-        } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-            return;
-          }
         }
       }
 
-      if (telegramSendStatus?.ok) {
-        setDownloadNotice(
-          'Already sent to your Telegram chat — open the chat to save to your gallery.'
-        );
-        return;
-      }
+      setIsPreparingDownload(true);
+      try {
+        const form = new FormData();
+        form.append('video', exportedVideo.blob, fileName);
+        form.append('initData', tgContext.initData);
+        form.append('fileName', fileName);
 
-      setDownloadNotice(
-        'Telegram blocks direct browser downloads — sending your MP4 to your Telegram chat so you can save it to Gallery.'
-      );
-      await handleSendToTelegramChat();
+        const res = await fetch('/api/prepare-download', {
+          method: 'POST',
+          body: form,
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          downloadUrl?: string;
+          fileName?: string;
+          error?: string;
+        };
+
+        if (!res.ok || !data.ok || !data.downloadUrl) {
+          setDownloadNotice(
+            data.error ||
+              'Direct download unavailable right now. Tap "Send to My Telegram Chat" above to save instantly.'
+          );
+          return;
+        }
+
+        const resolvedName = data.fileName || fileName;
+        preparedDownloadRef.current = { url: data.downloadUrl, fileName: resolvedName };
+
+        const mode = triggerTelegramNativeDownload(data.downloadUrl, resolvedName);
+        haptic('success');
+        if (mode === 'native-dialog') {
+          setDownloadNotice('Tap Download in the Telegram popup to save the MP4 to your phone.');
+        } else if (mode === 'external-browser') {
+          setDownloadNotice('Opening MP4 download in your phone browser...');
+        } else {
+          window.location.href = data.downloadUrl;
+          setDownloadNotice('Download started — check your Downloads folder.');
+        }
+      } catch {
+        setDownloadNotice(
+          'Could not start direct download. Tap "Send to My Telegram Chat" above to save to Gallery.'
+        );
+      } finally {
+        setIsPreparingDownload(false);
+      }
       return;
     }
 
@@ -760,6 +798,7 @@ export default function App() {
         exportError={exportError}
         exportedVideo={exportedVideo}
         isSendingTelegram={isSendingTelegram}
+        isPreparingDownload={isPreparingDownload}
         telegramSendStatus={telegramSendStatus}
         downloadNotice={downloadNotice}
         nativeShareSupported={nativeShareSupported}

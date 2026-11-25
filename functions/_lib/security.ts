@@ -171,6 +171,29 @@ export async function getEffectiveBotToken(env: Env): Promise<string> {
   return (env.TELEGRAM_BOT_TOKEN || '').trim();
 }
 
+export async function signDownloadToken(
+  env: Env,
+  fileId: string,
+  exp: number,
+  fileName: string
+): Promise<string> {
+  const secret = await ensureSigningSecret(env);
+  return hmacSha256Hex(secret, `dl.${fileId}.${exp}.${fileName}`);
+}
+
+export async function verifyDownloadToken(
+  env: Env,
+  fileId: string,
+  exp: number,
+  fileName: string,
+  sig: string
+): Promise<boolean> {
+  if (!fileId || !fileName || !sig) return false;
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const expected = await signDownloadToken(env, fileId, exp, fileName);
+  return constantTimeEqual(sig, expected);
+}
+
 export function maskSecret(value: string): string {
   if (!value) return '';
   if (value.length <= 10) return '••••••••';

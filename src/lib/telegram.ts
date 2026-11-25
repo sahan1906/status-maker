@@ -13,6 +13,12 @@ interface TelegramWebApp {
   };
   ready: () => void;
   expand: () => void;
+  isVersionAtLeast?: (version: string) => boolean;
+  openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
+  downloadFile?: (
+    params: { url: string; file_name: string },
+    callback?: (accepted: boolean) => void
+  ) => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
   HapticFeedback?: {
@@ -59,6 +65,41 @@ export function initTelegramApp(): TelegramContextInfo {
     userId: user?.id ? String(user.id) : '',
     username: user?.username || user?.first_name || '',
   };
+}
+
+export function triggerTelegramNativeDownload(
+  url: string,
+  fileName: string
+): 'native-dialog' | 'external-browser' | 'unsupported' {
+  const tg = window.Telegram?.WebApp;
+  if (!tg) return 'unsupported';
+
+  try {
+    const supportsDownloadFile =
+      typeof tg.downloadFile === 'function' &&
+      (!tg.isVersionAtLeast || tg.isVersionAtLeast('8.0'));
+
+    if (supportsDownloadFile && tg.downloadFile) {
+      tg.downloadFile({ url, file_name: fileName });
+      return 'native-dialog';
+    }
+
+    if (typeof tg.openLink === 'function') {
+      tg.openLink(url);
+      return 'external-browser';
+    }
+  } catch {
+    if (typeof tg.openLink === 'function') {
+      try {
+        tg.openLink(url);
+        return 'external-browser';
+      } catch {
+        return 'unsupported';
+      }
+    }
+  }
+
+  return 'unsupported';
 }
 
 export function haptic(kind: 'light' | 'medium' | 'success' = 'light'): void {
