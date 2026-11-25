@@ -166,7 +166,7 @@ export default function App() {
     const validFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
     if (validFiles.length === 0) return;
 
-    const incoming: GalleryPhoto[] = validFiles.slice(0, 10).map((file, i) => {
+    const incoming: GalleryPhoto[] = validFiles.slice(0, 50).map((file, i) => {
       const id = `photo-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
       rawFileMapRef.current.set(id, file);
       return {
@@ -180,7 +180,7 @@ export default function App() {
     setPhotos((prev) => {
       const onlySamples = prev.every((p) => p.isSample);
       const base = onlySamples ? [] : prev;
-      return [...base, ...incoming].slice(0, 10);
+      return [...base, ...incoming].slice(0, 50);
     });
     setExportedVideo(null);
     setTelegramSendStatus(null);

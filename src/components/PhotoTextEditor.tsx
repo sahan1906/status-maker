@@ -125,7 +125,7 @@ export function PhotoTextEditor({
         multiple
         onChange={handleFileChange}
         className="sr-only"
-        aria-label="Pick 3 to 10 photos from gallery"
+        aria-label="Pick up to 50 photos from gallery"
       />
 
       {/* CapCut / InShot Tool Selector Row — sits directly under live video so every change previews immediately */}
@@ -165,8 +165,8 @@ export function PhotoTextEditor({
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs text-zinc-400 font-mono tabular-nums">
                 {hasOnlySamples
-                  ? 'Sample photos · Tap + to pick 3–10 yours'
-                  : `${photos.length}/10 photos · Tap clip to reorder`}
+                  ? 'Sample photos · Tap + to pick up to 50 yours'
+                  : `${photos.length}/50 photos · Tap clip to reorder`}
               </span>
               <div className="flex items-center gap-1.5">
                 {!hasOnlySamples && (
@@ -217,12 +217,12 @@ export function PhotoTextEditor({
               <button
                 type="button"
                 onClick={() => inputRef.current?.click()}
-                disabled={!hasOnlySamples && photos.length >= 10}
+                disabled={!hasOnlySamples && photos.length >= 50}
                 className="shrink-0 w-[72px] h-[96px] rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 disabled:opacity-40 flex flex-col items-center justify-center gap-1 transition"
               >
                 <ImagePlus className="w-5 h-5" />
                 <span className="text-[11px] font-bold">
-                  {hasOnlySamples ? 'Add' : `${photos.length}/10`}
+                  {hasOnlySamples ? 'Add' : `${photos.length}/50`}
                 </span>
               </button>
 

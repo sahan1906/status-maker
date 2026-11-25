@@ -61,7 +61,7 @@ export const onRequestPost: PagesHandler = async ({ request, env }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: `Welcome to ${siteName}.\n\nTurn 3 to 10 photos into cinematic 9:16 status videos for WhatsApp Status & Instagram Reels in seconds.`,
+          text: `Welcome to ${siteName}.\n\nTurn up to 50 photos into cinematic 9:16 status videos for WhatsApp Status & Instagram Reels in seconds.`,
           reply_markup: {
             inline_keyboard: [
               [

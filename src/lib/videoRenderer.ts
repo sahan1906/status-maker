@@ -1471,13 +1471,37 @@ export function renderFrame(
   drawTemplateOverlay(ctx, w, h, timeSec, config);
 }
 
+const MAX_BITMAP_EDGE = 1440;
+
+async function downscaleBitmapIfNeeded(bitmap: ImageBitmap): Promise<ImageBitmap> {
+  const maxDim = Math.max(bitmap.width, bitmap.height);
+  if (maxDim <= MAX_BITMAP_EDGE) return bitmap;
+
+  const scale = MAX_BITMAP_EDGE / maxDim;
+  const targetW = Math.max(1, Math.round(bitmap.width * scale));
+  const targetH = Math.max(1, Math.round(bitmap.height * scale));
+  try {
+    const resized = await createImageBitmap(bitmap, {
+      resizeWidth: targetW,
+      resizeHeight: targetH,
+      resizeQuality: 'high',
+    });
+    bitmap.close();
+    return resized;
+  } catch {
+    return bitmap;
+  }
+}
+
 /**
  * Decodes an uploaded File or image URL with automatic EXIF orientation handling via createImageBitmap.
+ * Downscales large camera photos (>1440px) so up to 50 photos stay lightweight in mobile RAM.
  */
 export async function loadOrientedImage(source: File | string): Promise<FrameImage> {
   if (typeof source !== 'string' && typeof createImageBitmap === 'function') {
     try {
-      return await createImageBitmap(source, { imageOrientation: 'from-image' });
+      const raw = await createImageBitmap(source, { imageOrientation: 'from-image' });
+      return await downscaleBitmapIfNeeded(raw);
     } catch {
       // Fallback to Image element below
     }
@@ -1495,7 +1519,8 @@ export async function loadOrientedImage(source: File | string): Promise<FrameIma
 
     if (typeof createImageBitmap === 'function') {
       try {
-        return await createImageBitmap(img);
+        const raw = await createImageBitmap(img);
+        return await downscaleBitmapIfNeeded(raw);
       } catch {
         return img;
       }
@@ -1506,6 +1531,14 @@ export async function loadOrientedImage(source: File | string): Promise<FrameIma
       URL.revokeObjectURL(url);
     }
   }
+}
+
+function getAdaptiveVideoBitrate(durationSec: number): number {
+  // Keep 720x1280 H.264 crisp (4.2 Mbps for normal reels) while scaling gracefully
+  // for long 20–50 photo edits so the exported MP4 fits inside Telegram's 19.5 MB download limit.
+  const targetBudgetBits = 16.5 * 8 * 1024 * 1024;
+  const calculated = targetBudgetBits / Math.max(1, durationSec);
+  return Math.round(Math.max(1_100_000, Math.min(4_200_000, calculated)));
 }
 
 async function canUseWebCodecsH264(width: number, height: number): Promise<boolean> {
@@ -1565,11 +1598,13 @@ async function exportViaWebCodecsMp4(
     },
   });
 
+  const bitrate = getAdaptiveVideoBitrate(durationSec);
+
   encoder.configure({
     codec: 'avc1.42001f',
     width,
     height,
-    bitrate: 4_200_000,
+    bitrate,
     framerate: fps,
     avc: { format: 'avc' },
   });
@@ -1660,7 +1695,7 @@ async function exportViaMediaRecorder(
   ];
   const chosenMime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || '';
   const recorder = new MediaRecorder(stream, {
-    videoBitsPerSecond: 4_000_000,
+    videoBitsPerSecond: getAdaptiveVideoBitrate(durationSec),
     ...(chosenMime ? { mimeType: chosenMime } : {}),
   });
 
