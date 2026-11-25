@@ -19,6 +19,12 @@ async function handleDownload(request: Request, env: Parameters<PagesHandler>[0]
     return jsonResponse({ error: 'Download link expired or invalid.' }, 403);
   }
 
+  const copyRaw = (url.searchParams.get('copy') || '').trim();
+  const copyNum = /^[2-9]\d{0,4}$|^1\d{1,4}$/.test(copyRaw) ? copyRaw : '';
+  const downloadFileName = copyNum
+    ? fileName.replace(/(\.[a-z0-9]+)$/i, `-${copyNum}$1`)
+    : fileName;
+
   const botToken = await getEffectiveBotToken(env);
   if (!botToken) {
     return jsonResponse({ error: 'Bot token not configured.' }, 503);
@@ -45,10 +51,10 @@ async function handleDownload(request: Request, env: Parameters<PagesHandler>[0]
     return jsonResponse({ error: 'Could not retrieve video stream.' }, 502);
   }
 
-  const contentType = fileName.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4';
+  const contentType = downloadFileName.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4';
   const headers = new Headers({
     'Content-Type': contentType,
-    'Content-Disposition': `attachment; filename="${fileName}"`,
+    'Content-Disposition': `attachment; filename="${downloadFileName}"`,
     'Cache-Control': 'private, no-store',
     'Access-Control-Allow-Origin': '*',
   });

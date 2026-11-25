@@ -92,7 +92,12 @@ export default function App() {
     message: string;
   } | null>(null);
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
-  const preparedDownloadRef = useRef<{ url: string; fileName: string } | null>(null);
+  const preparedDownloadRef = useRef<{
+    url: string;
+    fileName: string;
+    expiresAt: number;
+  } | null>(null);
+  const downloadCopyCountRef = useRef(0);
 
   const refreshConfig = useCallback(async () => {
     const cfg = await fetchPublicAppConfig();
@@ -134,6 +139,7 @@ export default function App() {
 
   useEffect(() => {
     preparedDownloadRef.current = null;
+    downloadCopyCountRef.current = 0;
     return () => {
       if (exportedVideo?.url) {
         URL.revokeObjectURL(exportedVideo.url);
@@ -217,16 +223,19 @@ export default function App() {
     setExportedVideo(null);
   };
 
-  const getSafeVideoFilename = (result: ExportVideoResult) => {
+  const getSafeVideoFilename = (result: ExportVideoResult, copyNum = 1) => {
     const slug = selectedTemplate.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
-    return `ReelCraft-${slug || 'status'}.${result.extension}`;
+    const stamp = String(Date.now()).slice(-5);
+    const suffix = copyNum > 1 ? `-${copyNum}` : '';
+    return `ReelCraft-${slug || 'status'}-${stamp}${suffix}.${result.extension}`;
   };
 
   const triggerBrowserDownload = (result: ExportVideoResult) => {
-    const filename = getSafeVideoFilename(result);
+    downloadCopyCountRef.current += 1;
+    const filename = getSafeVideoFilename(result, downloadCopyCountRef.current);
     // Use application/octet-stream to force file download instead of inline video preview on mobile/Safari
     const downloadBlob = new Blob([result.blob], { type: 'application/octet-stream' });
     const downloadUrl = URL.createObjectURL(downloadBlob);
@@ -428,21 +437,36 @@ export default function App() {
     haptic('light');
     setDownloadNotice(null);
 
-    const fileName = getSafeVideoFilename(exportedVideo);
+    const baseFileName = getSafeVideoFilename(exportedVideo, 1);
 
     // Inside Telegram Mini App, WebViews block <a href="blob:..." download>.
     // Prepare a short-lived signed HTTPS download URL and trigger Telegram's native downloadFile API
-    // (or external browser download fallback on older Telegram clients).
+    // with a unique copy number + cache-buster on every click so Telegram always downloads a fresh file.
     if (tgContext.isTelegram) {
-      if (preparedDownloadRef.current) {
-        const mode = triggerTelegramNativeDownload(
-          preparedDownloadRef.current.url,
-          preparedDownloadRef.current.fileName
-        );
+      downloadCopyCountRef.current += 1;
+      const copyNum = downloadCopyCountRef.current;
+
+      const buildAttemptDownload = (baseUrl: string, baseName: string) => {
+        const sep = baseUrl.includes('?') ? '&' : '?';
+        const attemptUrl =
+          copyNum > 1
+            ? `${baseUrl}${sep}copy=${copyNum}&t=${Date.now()}`
+            : `${baseUrl}${sep}t=${Date.now()}`;
+        const attemptName =
+          copyNum > 1
+            ? baseName.replace(/(\.[a-z0-9]+)$/i, `-${copyNum}$1`)
+            : baseName;
+        return { attemptUrl, attemptName };
+      };
+
+      const cached = preparedDownloadRef.current;
+      if (cached && Date.now() < cached.expiresAt) {
+        const { attemptUrl, attemptName } = buildAttemptDownload(cached.url, cached.fileName);
+        const mode = triggerTelegramNativeDownload(attemptUrl, attemptName);
         if (mode !== 'unsupported') {
           setDownloadNotice(
             mode === 'native-dialog'
-              ? 'Tap Download in the Telegram popup to save the MP4 to your device.'
+              ? `Tap Download in the Telegram popup to save ${attemptName}.`
               : 'Opening direct MP4 download in your browser...'
           );
           return;
@@ -452,9 +476,9 @@ export default function App() {
       setIsPreparingDownload(true);
       try {
         const form = new FormData();
-        form.append('video', exportedVideo.blob, fileName);
+        form.append('video', exportedVideo.blob, baseFileName);
         form.append('initData', tgContext.initData);
-        form.append('fileName', fileName);
+        form.append('fileName', baseFileName);
 
         const res = await fetch('/api/prepare-download', {
           method: 'POST',
@@ -475,17 +499,25 @@ export default function App() {
           return;
         }
 
-        const resolvedName = data.fileName || fileName;
-        preparedDownloadRef.current = { url: data.downloadUrl, fileName: resolvedName };
+        const resolvedBaseName = data.fileName || baseFileName;
+        preparedDownloadRef.current = {
+          url: data.downloadUrl,
+          fileName: resolvedBaseName,
+          expiresAt: Date.now() + 8 * 60 * 1000,
+        };
 
-        const mode = triggerTelegramNativeDownload(data.downloadUrl, resolvedName);
+        const { attemptUrl, attemptName } = buildAttemptDownload(
+          data.downloadUrl,
+          resolvedBaseName
+        );
+        const mode = triggerTelegramNativeDownload(attemptUrl, attemptName);
         haptic('success');
         if (mode === 'native-dialog') {
-          setDownloadNotice('Tap Download in the Telegram popup to save the MP4 to your phone.');
+          setDownloadNotice(`Tap Download in the Telegram popup to save ${attemptName}.`);
         } else if (mode === 'external-browser') {
           setDownloadNotice('Opening MP4 download in your phone browser...');
         } else {
-          window.location.href = data.downloadUrl;
+          window.location.href = attemptUrl;
           setDownloadNotice('Download started — check your Downloads folder.');
         }
       } catch {
