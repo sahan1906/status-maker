@@ -6,9 +6,9 @@ import { GalleryPhoto, PhotoTextEditor } from './components/PhotoTextEditor';
 import { TemplateGallery } from './components/TemplateGallery';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import {
+  BLANK_TEMPLATE,
   LandscapeTilt,
   PaceMode,
-  REEL_TEMPLATES,
   ReelTemplate,
   TemplateCategory,
   TransitionChoice,
@@ -30,17 +30,29 @@ import {
   triggerTelegramNativeDownload,
 } from './lib/telegram';
 import {
+  createClipVideoElement,
   exportReelMp4,
   ExportVideoResult,
   FrameImage,
+  FrameSource,
+  getSlideDuration,
+  isVideoElement,
   loadOrientedImage,
+  loadVideoAsset,
+  RenderClip,
 } from './lib/videoRenderer';
 
 type StudioView = 'templates' | 'edit';
 
+interface DecodedEntry {
+  source: FrameSource;
+  poster?: FrameImage;
+}
+
 function makeSampleGallery(template: ReelTemplate): GalleryPhoto[] {
   return template.samplePhotos.map((url, idx) => ({
     id: `sample-${template.id}-${idx}`,
+    kind: 'photo',
     previewUrl: url,
     name: `${template.name} ${idx + 1}`,
     isSample: true,
@@ -61,19 +73,24 @@ export default function App() {
     username: '',
   });
 
-  // Clean 2-view workflow: Templates & Photos Edit
+  // Clean 2-view workflow: Templates & Media Editor (starts Blank by default)
   const [view, setView] = useState<StudioView>('templates');
   const [activeCategory, setActiveCategory] = useState<TemplateCategory>('travel');
-  const [selectedTemplate, setSelectedTemplate] = useState<ReelTemplate>(REEL_TEMPLATES[0]);
+  const [selectedTemplate, setSelectedTemplate] = useState<ReelTemplate>(BLANK_TEMPLATE);
 
   const [photos, setPhotos] = useState<GalleryPhoto[]>(() =>
-    makeSampleGallery(REEL_TEMPLATES[0])
+    makeSampleGallery(BLANK_TEMPLATE)
   );
-  const [decodedFrames, setDecodedFrames] = useState<FrameImage[]>([]);
+  const [decodedClips, setDecodedClips] = useState<RenderClip[]>([]);
+  const decodedCacheRef = useRef<Map<string, DecodedEntry>>(new Map());
   const rawFileMapRef = useRef<Map<string, File>>(new Map());
+  const [isLoadingMedia, setIsLoadingMedia] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [scrubRequest, setScrubRequest] = useState<{ timeSec: number; nonce: number } | null>(null);
+  const scrubNonceRef = useRef(0);
 
-  const [title, setTitle] = useState<string>(REEL_TEMPLATES[0].defaultTitle);
-  const [subtitle, setSubtitle] = useState<string>(REEL_TEMPLATES[0].defaultSubtitle);
+  const [title, setTitle] = useState<string>(BLANK_TEMPLATE.defaultTitle);
+  const [subtitle, setSubtitle] = useState<string>(BLANK_TEMPLATE.defaultSubtitle);
   const [pace, setPace] = useState<PaceMode>('normal');
   const [landscapeTilt, setLandscapeTilt] = useState<LandscapeTilt>('right');
   const [transitionChoice, setTransitionChoice] = useState<TransitionChoice>('auto');
@@ -149,27 +166,99 @@ export default function App() {
     }
   }, [appConfig, isExporting, isRunningAd, isRunningInterstitial, muteAndPauseDomMedia]);
 
-  // Decode EXIF-oriented ImageBitmaps whenever photo list updates
+  // Decode & cache per-clip media (ImageBitmaps for photos, dedicated HTMLVideoElements for video clips)
   useEffect(() => {
     let cancelled = false;
+    const activeIds = new Set(photos.map((p) => p.id));
+
+    // Dispose removed clip decoders to keep mobile RAM & video decoder count low
+    for (const [id, entry] of decodedCacheRef.current.entries()) {
+      if (!activeIds.has(id)) {
+        if (isVideoElement(entry.source)) {
+          try {
+            entry.source.pause();
+            entry.source.removeAttribute('src');
+            entry.source.load();
+          } catch {
+            // ignore
+          }
+        }
+        decodedCacheRef.current.delete(id);
+      }
+    }
+
     Promise.all(
-      photos.map(async (item) => {
-        const rawFile = rawFileMapRef.current.get(item.id);
+      photos.map(async (item): Promise<RenderClip | null> => {
+        const cached = decodedCacheRef.current.get(item.id);
+        if (cached) {
+          return {
+            id: item.id,
+            kind: item.kind,
+            source: cached.source,
+            poster: cached.poster,
+            trimStart: item.trimStart ?? 0,
+            trimEnd: item.trimEnd ?? item.sourceDuration ?? 0,
+          };
+        }
+
         try {
-          return await loadOrientedImage(rawFile ?? item.previewUrl);
+          if (item.kind === 'video' && item.videoUrl) {
+            const [videoEl, posterImg] = await Promise.all([
+              createClipVideoElement(item.videoUrl, item.trimStart ?? 0),
+              loadOrientedImage(item.previewUrl).catch(() => undefined),
+            ]);
+            if (cancelled) {
+              videoEl.pause();
+              videoEl.removeAttribute('src');
+              videoEl.load();
+              return null;
+            }
+            const entry: DecodedEntry = { source: videoEl, poster: posterImg };
+            decodedCacheRef.current.set(item.id, entry);
+            return {
+              id: item.id,
+              kind: 'video',
+              source: videoEl,
+              poster: posterImg,
+              trimStart: item.trimStart ?? 0,
+              trimEnd: item.trimEnd ?? item.sourceDuration ?? 3,
+            };
+          }
+
+          const rawFile = rawFileMapRef.current.get(item.id);
+          const img = await loadOrientedImage(rawFile ?? item.previewUrl);
+          if (cancelled) return null;
+          decodedCacheRef.current.set(item.id, { source: img });
+          return {
+            id: item.id,
+            kind: 'photo',
+            source: img,
+            trimStart: 0,
+            trimEnd: 0,
+          };
         } catch {
           return null;
         }
       })
     ).then((loaded) => {
       if (cancelled) return;
-      const valid = loaded.filter((f): f is FrameImage => f !== null);
-      setDecodedFrames(valid);
+      const valid = loaded.filter((c): c is RenderClip => c !== null);
+      setDecodedClips(valid);
     });
+
     return () => {
       cancelled = true;
     };
   }, [photos]);
+
+  // Keep photo-only array for backwards-compatible RenderConfig.images field
+  const decodedFrames = useMemo<FrameImage[]>(
+    () =>
+      decodedClips
+        .map((c) => (isVideoElement(c.source) ? c.poster : c.source))
+        .filter((f): f is FrameImage => Boolean(f)),
+    [decodedClips]
+  );
 
   useEffect(() => {
     preparedDownloadRef.current = null;
@@ -205,6 +294,7 @@ export default function App() {
 
   const handleAddPhotos = (files: FileList) => {
     haptic('light');
+    setMediaError(null);
     const validFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
     if (validFiles.length === 0) return;
 
@@ -213,6 +303,7 @@ export default function App() {
       rawFileMapRef.current.set(id, file);
       return {
         id,
+        kind: 'photo',
         previewUrl: URL.createObjectURL(file),
         name: file.name,
         isSample: false,
@@ -228,15 +319,69 @@ export default function App() {
     setTelegramSendStatus(null);
   };
 
+  const handleAddVideos = async (files: FileList) => {
+    haptic('light');
+    setMediaError(null);
+    const validFiles = Array.from(files).filter(
+      (f) => f.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|3gp)$/i.test(f.name)
+    );
+    if (validFiles.length === 0) return;
+
+    setIsLoadingMedia(true);
+    try {
+      const incoming: GalleryPhoto[] = [];
+      for (let i = 0; i < Math.min(validFiles.length, 10); i += 1) {
+        const file = validFiles[i];
+        try {
+          const asset = await loadVideoAsset(file);
+          const id = `video-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
+          incoming.push({
+            id,
+            kind: 'video',
+            previewUrl: asset.posterUrl,
+            videoUrl: asset.videoUrl,
+            name: file.name,
+            isSample: false,
+            sourceDuration: asset.duration,
+            trimStart: 0,
+            trimEnd: asset.duration,
+          });
+        } catch {
+          setMediaError(`Could not open "${file.name}". Try an MP4 or MOV video.`);
+        }
+      }
+
+      if (incoming.length > 0) {
+        setPhotos((prev) => {
+          const onlySamples = prev.every((p) => p.isSample);
+          const base = onlySamples ? [] : prev;
+          return [...base, ...incoming].slice(0, 50);
+        });
+        setExportedVideo(null);
+        setTelegramSendStatus(null);
+      }
+    } finally {
+      setIsLoadingMedia(false);
+    }
+  };
+
   const handleRemovePhoto = (id: string) => {
     setPhotos((prev) => {
       if (prev.length <= 1) return prev;
       const target = prev.find((p) => p.id === id);
+      const remaining = prev.filter((p) => p.id !== id);
       if (target && !target.isSample) {
-        URL.revokeObjectURL(target.previewUrl);
-        rawFileMapRef.current.delete(id);
+        if (target.kind === 'photo') {
+          URL.revokeObjectURL(target.previewUrl);
+          rawFileMapRef.current.delete(id);
+        } else if (
+          target.videoUrl &&
+          !remaining.some((item) => item.videoUrl === target.videoUrl)
+        ) {
+          URL.revokeObjectURL(target.videoUrl);
+        }
       }
-      return prev.filter((p) => p.id !== id);
+      return remaining;
     });
     setExportedVideo(null);
   };
@@ -252,12 +397,101 @@ export default function App() {
     setExportedVideo(null);
   };
 
-  const handleResetSamples = () => {
+  const handleTrimClip = (id: string, trimStart: number, trimEnd: number) => {
+    setPhotos((prev) =>
+      prev.map((item) => {
+        if (item.id !== id || item.kind !== 'video') return item;
+        const maxDur = Math.max(0.4, item.sourceDuration ?? trimEnd);
+        const safeStart = Math.max(0, Math.min(trimStart, maxDur - 0.3));
+        const safeEnd = Math.max(safeStart + 0.3, Math.min(trimEnd, maxDur));
+        return {
+          ...item,
+          trimStart: Number(safeStart.toFixed(2)),
+          trimEnd: Number(safeEnd.toFixed(2)),
+        };
+      })
+    );
+    setExportedVideo(null);
+  };
+
+  const handleSplitClip = (id: string, splitAtSourceSec: number): string | null => {
+    const idx = photos.findIndex((p) => p.id === id);
+    if (idx < 0) return null;
+    const target = photos[idx];
+    if (target.kind !== 'video' || !target.videoUrl) return null;
+    if (photos.length >= 50) {
+      setMediaError('Maximum 50 clips reached. Delete a clip before splitting.');
+      return null;
+    }
+
+    const start = target.trimStart ?? 0;
+    const end = target.trimEnd ?? target.sourceDuration ?? 3;
+    if (splitAtSourceSec <= start + 0.25 || splitAtSourceSec >= end - 0.25) {
+      return null;
+    }
+
+    const newId = `video-cut-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const leftClip: GalleryPhoto = {
+      ...target,
+      trimStart: start,
+      trimEnd: Number(splitAtSourceSec.toFixed(2)),
+    };
+    const rightClip: GalleryPhoto = {
+      ...target,
+      id: newId,
+      name: `${target.name} (Cut)`,
+      trimStart: Number(splitAtSourceSec.toFixed(2)),
+      trimEnd: end,
+    };
+
+    haptic('medium');
     setPhotos((prev) => {
+      const next = [...prev];
+      const currentIdx = next.findIndex((p) => p.id === id);
+      if (currentIdx < 0) return prev;
+      next.splice(currentIdx, 1, leftClip, rightClip);
+      return next;
+    });
+    setExportedVideo(null);
+    return newId;
+  };
+
+  const handleScrubClipTime = (clipId: string, sourceTimeSec: number) => {
+    const slideDur = getSlideDuration(selectedTemplate, pace);
+    const introDur =
+      selectedTemplate.overlay === 'kinetic-intro' && (title.trim() || subtitle.trim()) ? 1.0 : 0;
+    let cursor = introDur;
+
+    for (const item of photos) {
+      if (item.id === clipId) {
+        const start = item.trimStart ?? 0;
+        const end = item.trimEnd ?? item.sourceDuration ?? slideDur;
+        const clampedOffset = Math.max(0, Math.min(sourceTimeSec - start, Math.max(0.05, end - start - 0.02)));
+        scrubNonceRef.current += 1;
+        setScrubRequest({ timeSec: cursor + clampedOffset, nonce: scrubNonceRef.current });
+        return;
+      }
+      if (item.kind === 'video') {
+        cursor += Math.max(0.3, (item.trimEnd ?? item.sourceDuration ?? 3) - (item.trimStart ?? 0));
+      } else {
+        cursor += slideDur;
+      }
+    }
+  };
+
+  const handleResetSamples = () => {
+    setMediaError(null);
+    setPhotos((prev) => {
+      const revokedUrls = new Set<string>();
       prev.forEach((p) => {
         if (!p.isSample) {
-          URL.revokeObjectURL(p.previewUrl);
-          rawFileMapRef.current.delete(p.id);
+          if (p.kind === 'photo') {
+            URL.revokeObjectURL(p.previewUrl);
+            rawFileMapRef.current.delete(p.id);
+          } else if (p.videoUrl && !revokedUrls.has(p.videoUrl)) {
+            revokedUrls.add(p.videoUrl);
+            URL.revokeObjectURL(p.videoUrl);
+          }
         }
       });
       return makeSampleGallery(selectedTemplate);
@@ -297,8 +531,8 @@ export default function App() {
   };
 
   const runMp4EncodeAndDownload = async () => {
-    if (decodedFrames.length === 0) {
-      setExportError('Wait a moment for your photos to finish loading.');
+    if (decodedClips.length === 0) {
+      setExportError('Wait a moment for your photos or videos to finish loading.');
       return;
     }
 
@@ -318,6 +552,7 @@ export default function App() {
         config: {
           template: selectedTemplate,
           images: decodedFrames,
+          clips: decodedClips,
           title,
           subtitle,
           pace,
@@ -374,9 +609,9 @@ export default function App() {
       return;
     }
 
-    if (decodedFrames.length === 0) {
+    if (decodedClips.length === 0) {
       setAwaitingAdConfirm(false);
-      setExportError('Wait a moment for your photos to finish loading.');
+      setExportError('Wait a moment for your photos or videos to finish loading.');
       return;
     }
 
@@ -668,7 +903,7 @@ export default function App() {
                   : 'hover:text-white'
               }`}
             >
-              Photos Edit
+              Editor
             </button>
           </nav>
 
@@ -717,18 +952,19 @@ export default function App() {
                       {selectedTemplate.name} · {selectedTemplate.badge}
                     </p>
                   </div>
-                  <button
+                <button
                     type="button"
                     onClick={() => setView('edit')}
                     className="text-xs font-semibold text-white hover:underline whitespace-nowrap"
                   >
-                    Edit Photos →
+                    Open Editor →
                   </button>
                 </div>
 
                 <VideoPreviewStage
                   template={selectedTemplate}
                   images={decodedFrames}
+                  clips={decodedClips}
                   title={title}
                   subtitle={subtitle}
                   pace={pace}
@@ -745,7 +981,7 @@ export default function App() {
         </main>
       )}
 
-      {/* VIEW 2: CAPCUT / INSHOT ZERO-SCROLL PHOTOS EDIT STUDIO */}
+      {/* VIEW 2: CAPCUT / INSHOT ZERO-SCROLL MEDIA EDIT STUDIO */}
       {view === 'edit' && (
         <main className="flex-1 min-h-0 max-w-7xl w-full mx-auto flex flex-col lg:grid lg:grid-cols-12 lg:gap-8 lg:px-6 lg:py-6 overflow-hidden">
           {/* Always-visible Live Video Stage (Top half on mobile, Left column on desktop) */}
@@ -753,6 +989,7 @@ export default function App() {
             <VideoPreviewStage
               template={selectedTemplate}
               images={decodedFrames}
+              clips={decodedClips}
               title={title}
               subtitle={subtitle}
               pace={pace}
@@ -762,6 +999,7 @@ export default function App() {
               watermarkText={appConfig.watermark_text}
               isExporting={isExporting}
               pausePlayback={isAnyAdOpen}
+              scrubRequest={scrubRequest}
               fillViewport
             />
           </div>
@@ -770,7 +1008,7 @@ export default function App() {
           <div className="shrink-0 lg:col-span-6 lg:flex lg:flex-col lg:justify-center pb-safe lg:pb-0">
             <div className="hidden lg:flex items-center justify-between mb-4 px-1">
               <div>
-                <h1 className="text-xl font-bold text-white">Photos Edit</h1>
+                <h1 className="text-xl font-bold text-white">Media Studio</h1>
                 <p className="text-xs text-zinc-400 mt-0.5">
                   {selectedTemplate.name} · Changes update live in the preview
                 </p>
@@ -793,9 +1031,15 @@ export default function App() {
               pace={pace}
               landscapeTilt={landscapeTilt}
               transitionChoice={transitionChoice}
+              isLoadingMedia={isLoadingMedia}
+              mediaError={mediaError}
               onAddPhotos={handleAddPhotos}
+              onAddVideos={handleAddVideos}
               onRemovePhoto={handleRemovePhoto}
               onMovePhoto={handleMovePhoto}
+              onTrimClip={handleTrimClip}
+              onSplitClip={handleSplitClip}
+              onScrubClipTime={handleScrubClipTime}
               onResetSamples={handleResetSamples}
               onTitleChange={(v) => {
                 setTitle(v);
@@ -853,7 +1097,7 @@ export default function App() {
               className="flex flex-col items-center justify-center gap-0.5 text-zinc-400 hover:text-white transition-colors"
             >
               <Images className="w-5 h-5" />
-              <span className="text-[11px] font-medium">Photos Edit</span>
+              <span className="text-[11px] font-medium">Editor</span>
             </button>
           </div>
         </nav>

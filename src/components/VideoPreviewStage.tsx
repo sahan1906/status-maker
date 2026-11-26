@@ -3,14 +3,19 @@ import { Maximize2, Pause, Play, RotateCcw, X } from 'lucide-react';
 import { LandscapeTilt, PaceMode, ReelTemplate, TransitionChoice } from '../data/templates';
 import {
   FrameImage,
+  getActiveVideoTargets,
   getTotalDuration,
+  isVideoElement,
+  RenderClip,
   renderFrame,
   RenderConfig,
+  seekVideoToTime,
 } from '../lib/videoRenderer';
 
 interface VideoPreviewStageProps {
   template: ReelTemplate;
   images: FrameImage[];
+  clips?: RenderClip[];
   title: string;
   subtitle: string;
   pace: PaceMode;
@@ -21,11 +26,13 @@ interface VideoPreviewStageProps {
   isExporting: boolean;
   pausePlayback?: boolean;
   fillViewport?: boolean;
+  scrubRequest?: { timeSec: number; nonce: number } | null;
 }
 
 export function VideoPreviewStage({
   template,
   images,
+  clips,
   title,
   subtitle,
   pace,
@@ -36,6 +43,7 @@ export function VideoPreviewStage({
   isExporting,
   pausePlayback = false,
   fillViewport = false,
+  scrubRequest = null,
 }: VideoPreviewStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fullCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -44,9 +52,11 @@ export function VideoPreviewStage({
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const timeRef = useRef(0);
+  const lastScrubNonceRef = useRef(-1);
   const configRef = useRef<RenderConfig>({
     template,
     images,
+    clips,
     title,
     subtitle,
     pace,
@@ -59,6 +69,7 @@ export function VideoPreviewStage({
   configRef.current = {
     template,
     images,
+    clips,
     title,
     subtitle,
     pace,
@@ -70,6 +81,97 @@ export function VideoPreviewStage({
 
   const totalDuration = getTotalDuration(configRef.current);
 
+  const pauseAllVideos = (cfg: RenderConfig) => {
+    if (!cfg.clips) return;
+    for (const c of cfg.clips) {
+      if (c.kind === 'video' && isVideoElement(c.source) && !c.source.paused) {
+        try {
+          c.source.pause();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  };
+
+  const syncVideosForTime = (t: number, cfg: RenderConfig, shouldPlay: boolean) => {
+    if (!cfg.clips || cfg.clips.length === 0) return;
+    const targets = getActiveVideoTargets(t, cfg);
+    const activeSet = new Set(targets.map((item) => item.video));
+
+    for (const c of cfg.clips) {
+      if (c.kind === 'video' && isVideoElement(c.source) && !activeSet.has(c.source)) {
+        if (!c.source.paused) {
+          try {
+            c.source.pause();
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    for (const target of targets) {
+      const vid = target.video;
+      if (shouldPlay) {
+        if (Math.abs(vid.currentTime - target.targetTime) > 0.28) {
+          try {
+            vid.currentTime = target.targetTime;
+          } catch {
+            // ignore
+          }
+        }
+        if (vid.paused) {
+          void vid.play().catch(() => {});
+        }
+      } else {
+        if (!vid.paused) {
+          try {
+            vid.pause();
+          } catch {
+            // ignore
+          }
+        }
+        if (Math.abs(vid.currentTime - target.targetTime) > 0.04) {
+          try {
+            vid.currentTime = target.targetTime;
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  };
+
+  // Allow Trim/Cut sliders to scrub the live preview straight to a specific frame
+  useEffect(() => {
+    if (!scrubRequest || scrubRequest.nonce === lastScrubNonceRef.current) return;
+    lastScrubNonceRef.current = scrubRequest.nonce;
+    const dur = getTotalDuration(configRef.current);
+    const clamped = Math.max(0, Math.min(scrubRequest.timeSec, Math.max(0, dur - 0.02)));
+    setIsPlaying(false);
+    timeRef.current = clamped;
+    setCurrentTime(clamped);
+
+    const targets = getActiveVideoTargets(clamped, configRef.current);
+    pauseAllVideos(configRef.current);
+    if (targets.length > 0) {
+      void Promise.all(targets.map((t) => seekVideoToTime(t.video, t.targetTime))).then(() => {
+        const activeCanvas = isFullscreen ? fullCanvasRef.current : canvasRef.current;
+        const ctx = activeCanvas?.getContext('2d');
+        if (ctx) {
+          renderFrame(ctx, clamped, configRef.current);
+        }
+      });
+    } else {
+      const activeCanvas = isFullscreen ? fullCanvasRef.current : canvasRef.current;
+      const ctx = activeCanvas?.getContext('2d');
+      if (ctx) {
+        renderFrame(ctx, clamped, configRef.current);
+      }
+    }
+  }, [scrubRequest, isFullscreen]);
+
   useEffect(() => {
     let raf = 0;
     let lastMs = performance.now();
@@ -78,18 +180,28 @@ export function VideoPreviewStage({
     const loop = (now: number) => {
       const dt = Math.min(0.1, (now - lastMs) / 1000);
       lastMs = now;
-      const dur = getTotalDuration(configRef.current);
+      const cfg = configRef.current;
+      const dur = getTotalDuration(cfg);
+      const activePlaying = isPlaying && !isExporting && !pausePlayback;
 
-      if (isPlaying && !isExporting && !pausePlayback) {
+      if (activePlaying) {
         timeRef.current = (timeRef.current + dt) % dur;
       } else if (timeRef.current >= dur) {
         timeRef.current = 0;
       }
 
+      if (!isExporting) {
+        if (pausePlayback) {
+          pauseAllVideos(cfg);
+        } else {
+          syncVideosForTime(timeRef.current, cfg, activePlaying);
+        }
+      }
+
       const activeCanvas = isFullscreen ? fullCanvasRef.current : canvasRef.current;
       const ctx = activeCanvas?.getContext('2d');
       if (ctx) {
-        renderFrame(ctx, timeRef.current, configRef.current);
+        renderFrame(ctx, timeRef.current, cfg);
       }
 
       if (now - lastUi > 100) {
@@ -101,7 +213,10 @@ export function VideoPreviewStage({
     };
 
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      pauseAllVideos(configRef.current);
+    };
   }, [isPlaying, isExporting, pausePlayback, isFullscreen]);
 
   const handleRestart = () => {
@@ -113,10 +228,23 @@ export function VideoPreviewStage({
   const handleSeek = (val: number) => {
     timeRef.current = val;
     setCurrentTime(val);
-    const activeCanvas = isFullscreen ? fullCanvasRef.current : canvasRef.current;
-    const ctx = activeCanvas?.getContext('2d');
-    if (ctx) {
-      renderFrame(ctx, val, configRef.current);
+    const cfg = configRef.current;
+    const targets = getActiveVideoTargets(val, cfg);
+    if (targets.length > 0 && !isPlaying) {
+      void Promise.all(targets.map((t) => seekVideoToTime(t.video, t.targetTime))).then(() => {
+        const activeCanvas = isFullscreen ? fullCanvasRef.current : canvasRef.current;
+        const ctx = activeCanvas?.getContext('2d');
+        if (ctx) {
+          renderFrame(ctx, val, cfg);
+        }
+      });
+    } else {
+      syncVideosForTime(val, cfg, isPlaying && !isExporting && !pausePlayback);
+      const activeCanvas = isFullscreen ? fullCanvasRef.current : canvasRef.current;
+      const ctx = activeCanvas?.getContext('2d');
+      if (ctx) {
+        renderFrame(ctx, val, cfg);
+      }
     }
   };
 

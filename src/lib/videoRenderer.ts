@@ -9,10 +9,35 @@ import {
 } from '../data/templates';
 
 export type FrameImage = ImageBitmap | HTMLImageElement;
+export type FrameSource = FrameImage | HTMLVideoElement;
+
+export interface RenderClip {
+  id: string;
+  kind: 'photo' | 'video';
+  source: FrameSource;
+  poster?: FrameImage;
+  trimStart: number;
+  trimEnd: number;
+}
+
+export interface ClipSegment {
+  index: number;
+  clip: RenderClip;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+}
+
+export interface VideoSyncTarget {
+  video: HTMLVideoElement;
+  targetTime: number;
+  isPrimary: boolean;
+}
 
 export interface RenderConfig {
   template: ReelTemplate;
   images: FrameImage[];
+  clips?: RenderClip[];
   title: string;
   subtitle: string;
   pace: PaceMode;
@@ -99,11 +124,155 @@ export function getSlideDuration(template: ReelTemplate, pace: PaceMode): number
   return Math.max(0.95, Number((PACE_SECONDS[pace] * template.paceMultiplier).toFixed(2)));
 }
 
-export function getTotalDuration(config: RenderConfig): number {
-  const count = Math.max(1, config.images.length);
+function getNormalizedClips(config: RenderConfig): RenderClip[] {
+  if (config.clips && config.clips.length > 0) {
+    return config.clips;
+  }
+  return config.images.map((img, idx) => ({
+    id: `img-${idx}`,
+    kind: 'photo',
+    source: img,
+    trimStart: 0,
+    trimEnd: 0,
+  }));
+}
+
+export function getClipTimeline(config: RenderConfig): {
+  introDur: number;
+  segments: ClipSegment[];
+  totalDuration: number;
+} {
+  const clips = getNormalizedClips(config);
   const slideDur = getSlideDuration(config.template, config.pace);
-  const introExtra = config.template.overlay === 'kinetic-intro' ? 1.0 : 0;
-  return Number((count * slideDur + introExtra).toFixed(2));
+  const hasIntroText = Boolean(config.title.trim() || config.subtitle.trim());
+  const introDur = config.template.overlay === 'kinetic-intro' && hasIntroText ? 1.0 : 0;
+
+  let cursor = introDur;
+  const segments: ClipSegment[] = clips.map((clip, index) => {
+    const durationSec =
+      clip.kind === 'video'
+        ? Math.max(0.3, Number((clip.trimEnd - clip.trimStart).toFixed(3)))
+        : slideDur;
+    const startSec = cursor;
+    const endSec = cursor + durationSec;
+    cursor = endSec;
+    return { index, clip, startSec, endSec, durationSec };
+  });
+
+  const totalDuration =
+    segments.length > 0 ? Number(cursor.toFixed(2)) : Number((slideDur + introDur).toFixed(2));
+  return { introDur, segments, totalDuration };
+}
+
+export function getTotalDuration(config: RenderConfig): number {
+  return getClipTimeline(config).totalDuration;
+}
+
+function getTransitionDuration(
+  activeTransition: TransitionType,
+  curDuration: number,
+  nextDuration: number
+): number {
+  if (activeTransition === 'none') return 0;
+  const base =
+    activeTransition === 'shutter-flash' || activeTransition === 'rgb-glitch' ? 0.42 : 0.62;
+  return Math.min(base, curDuration * 0.36, nextDuration * 0.36);
+}
+
+export function getActiveVideoTargets(timeSec: number, config: RenderConfig): VideoSyncTarget[] {
+  const { introDur, segments } = getClipTimeline(config);
+  if (segments.length === 0 || timeSec < introDur) return [];
+
+  const lastSeg = segments[segments.length - 1];
+  const clampedTime = Math.max(introDur, Math.min(timeSec, lastSeg.endSec - 0.0001));
+
+  let segIdx = segments.length - 1;
+  for (let i = 0; i < segments.length; i += 1) {
+    if (clampedTime < segments[i].endSec) {
+      segIdx = i;
+      break;
+    }
+  }
+
+  const seg = segments[segIdx];
+  const localTime = Math.max(0, clampedTime - seg.startSec);
+  const targets: VideoSyncTarget[] = [];
+
+  if (seg.clip.kind === 'video' && isVideoElement(seg.clip.source)) {
+    const targetTime = Math.min(
+      Math.max(seg.clip.trimStart, seg.clip.trimStart + localTime),
+      Math.max(seg.clip.trimStart, seg.clip.trimEnd - 0.02)
+    );
+    targets.push({ video: seg.clip.source, targetTime, isPrimary: true });
+  }
+
+  const activeTransition = getEffectiveTransition(config);
+  if (segIdx < segments.length - 1) {
+    const nextSeg = segments[segIdx + 1];
+    const transDur = getTransitionDuration(activeTransition, seg.durationSec, nextSeg.durationSec);
+    if (transDur > 0 && localTime > seg.durationSec - transDur) {
+      const tRaw = clamp01((localTime - (seg.durationSec - transDur)) / transDur);
+      if (nextSeg.clip.kind === 'video' && isVideoElement(nextSeg.clip.source)) {
+        const nextLocal = tRaw * Math.min(transDur, nextSeg.durationSec * 0.25);
+        const targetTime = Math.min(
+          Math.max(nextSeg.clip.trimStart, nextSeg.clip.trimStart + nextLocal),
+          Math.max(nextSeg.clip.trimStart, nextSeg.clip.trimEnd - 0.02)
+        );
+        targets.push({ video: nextSeg.clip.source, targetTime, isPrimary: false });
+      }
+    }
+  }
+
+  return targets;
+}
+
+export function isVideoElement(src: FrameSource): src is HTMLVideoElement {
+  return typeof HTMLVideoElement !== 'undefined' && src instanceof HTMLVideoElement;
+}
+
+export function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Promise<void> {
+  const maxDur =
+    Number.isFinite(video.duration) && video.duration > 0 ? Math.max(0, video.duration - 0.015) : targetSec;
+  const clamped = Math.max(0, Math.min(targetSec, maxDur));
+
+  if (!video.paused) {
+    try {
+      video.pause();
+    } catch {
+      // ignore
+    }
+  }
+
+  if (Math.abs(video.currentTime - clamped) < 0.008 && video.readyState >= 2) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.removeEventListener('seeked', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      video.removeEventListener('error', finish);
+      resolve();
+    };
+    const onReady = () => {
+      if (video.readyState >= 2) {
+        finish();
+      }
+    };
+    const timer = window.setTimeout(finish, 650);
+    video.addEventListener('seeked', onReady);
+    video.addEventListener('loadeddata', onReady);
+    video.addEventListener('error', finish, { once: true });
+    try {
+      video.currentTime = clamped;
+    } catch {
+      finish();
+    }
+  });
 }
 
 function clamp01(t: number): number {
@@ -155,7 +324,7 @@ const DEFAULT_META: PhotoMeta = {
   bgBottom: '#08080A',
 };
 
-const photoMetaCache = new WeakMap<FrameImage, PhotoMeta>();
+const photoMetaCache = new WeakMap<FrameSource, PhotoMeta>();
 let analysisCanvas: HTMLCanvasElement | null = null;
 let analysisCtx: CanvasRenderingContext2D | null = null;
 
@@ -164,7 +333,8 @@ let analysisCtx: CanvasRenderingContext2D | null = null;
  * and dominant top/bottom edge palette extractor. Keeps faces/subjects centered automatically
  * and derives native Instagram-style studio background colors without ugly Gaussian blur.
  */
-function analyzePhotoMeta(img: FrameImage): PhotoMeta {
+function analyzePhotoMeta(img: FrameSource): PhotoMeta {
+  if (isVideoElement(img)) return DEFAULT_META;
   const cached = photoMetaCache.get(img);
   if (cached) return cached;
 
@@ -278,7 +448,10 @@ function analyzePhotoMeta(img: FrameImage): PhotoMeta {
   }
 }
 
-function getSourceDims(img: FrameImage): { iw: number; ih: number } {
+function getSourceDims(img: FrameSource): { iw: number; ih: number } {
+  if (isVideoElement(img)) {
+    return { iw: img.videoWidth || img.width || 720, ih: img.videoHeight || img.height || 1280 };
+  }
   if ('naturalWidth' in img) {
     return { iw: img.naturalWidth || img.width, ih: img.naturalHeight || img.height };
   }
@@ -287,7 +460,7 @@ function getSourceDims(img: FrameImage): { iw: number; ih: number } {
 
 function drawCoverInRect(
   ctx: CanvasRenderingContext2D,
-  img: FrameImage,
+  img: FrameSource,
   rx: number,
   ry: number,
   rw: number,
@@ -338,7 +511,7 @@ function drawCoverInRect(
  */
 function drawAutoCoverInRect(
   ctx: CanvasRenderingContext2D,
-  img: FrameImage,
+  img: FrameSource,
   rx: number,
   ry: number,
   rw: number,
@@ -385,7 +558,7 @@ function drawAutoCoverInRect(
  */
 function drawAutoUniformSlide(
   ctx: CanvasRenderingContext2D,
-  img: FrameImage,
+  img: FrameSource,
   w: number,
   h: number,
   progress: number,
@@ -396,6 +569,7 @@ function drawAutoUniformSlide(
   const { iw, ih } = getSourceDims(img);
   if (!iw || !ih) return;
 
+  const isVid = isVideoElement(img);
   const meta = analyzePhotoMeta(img);
   const s = w / 720;
   const dir = slideIdx % 2 === 0 ? 1 : -1;
@@ -403,19 +577,19 @@ function drawAutoUniformSlide(
   const isLandscape = imgRatio >= 1.18;
   const isSquareType = imgRatio > 0.85 && imgRatio < 1.18;
 
-  // 1. LANDSCAPE PHOTO: Auto-rotate 90deg left/right and fill the 9:16 frame edge-to-edge
+  // 1. LANDSCAPE PHOTO / VIDEO: Auto-rotate 90deg left/right and fill the 9:16 frame edge-to-edge
   if (isLandscape) {
     ctx.save();
     ctx.filter = filter;
-    const zoom = 1.03 + progress * 0.08;
-    const driftY = dir * (easeInOutSine(progress) - 0.5) * h * 0.035;
-    const driftX = (0.5 - progress) * w * 0.02;
+    const zoom = isVid ? 1.0 : 1.03 + progress * 0.08;
+    const driftY = isVid ? 0 : dir * (easeInOutSine(progress) - 0.5) * h * 0.035;
+    const driftX = isVid ? 0 : (0.5 - progress) * w * 0.02;
     drawAutoCoverInRect(ctx, img, 0, 0, w, h, zoom, driftX, driftY, meta.focusX, meta.focusY, landscapeTilt);
     ctx.restore();
     return;
   }
 
-  // 2. SQUARE-TYPE PHOTO (e.g. 1:1, 5:6, 6:5): Fit uncropped inside frame + soft blurred backdrop
+  // 2. SQUARE-TYPE PHOTO / VIDEO: Fit uncropped inside frame + soft blurred backdrop
   if (isSquareType) {
     ctx.save();
     ctx.filter = 'blur(28px) brightness(0.45) saturate(1.22)';
@@ -448,7 +622,7 @@ function drawAutoUniformSlide(
     roundedRectPath(ctx, bx, by, boxW, boxH, radius);
     ctx.clip();
     ctx.filter = filter;
-    const gentleZoom = 1.0 + easeInOutSine(progress) * 0.05;
+    const gentleZoom = isVid ? 1.0 : 1.0 + easeInOutSine(progress) * 0.05;
     drawCoverInRect(ctx, img, bx, by, boxW, boxH, gentleZoom, 0, 0, meta.focusX, meta.focusY);
     ctx.restore();
 
@@ -461,12 +635,12 @@ function drawAutoUniformSlide(
     return;
   }
 
-  // 3. PORTRAIT PHOTO: Full-screen edge-to-edge 9:16 with smooth subject-anchored Ken Burns
+  // 3. PORTRAIT PHOTO / VIDEO: Full-screen edge-to-edge 9:16
   ctx.save();
   ctx.filter = filter;
-  const zoom = 1.03 + progress * 0.085;
-  const panX = dir * (easeInOutSine(progress) - 0.5) * w * 0.04;
-  const panY = (0.5 - progress) * h * 0.018;
+  const zoom = isVid ? 1.0 : 1.03 + progress * 0.085;
+  const panX = isVid ? 0 : dir * (easeInOutSine(progress) - 0.5) * w * 0.04;
+  const panY = isVid ? 0 : (0.5 - progress) * h * 0.018;
   drawCoverInRect(ctx, img, 0, 0, w, h, zoom, panX, panY, meta.focusX, meta.focusY);
   ctx.restore();
 }
@@ -494,6 +668,8 @@ function roundedRectPath(
 
 function getFilterString(template: ReelTemplate, slideProgress: number): string {
   switch (template.grade) {
+    case 'none':
+      return 'none';
     case 'kodak-warm':
       return 'contrast(1.06) saturate(1.12) sepia(0.14)';
     case 'teal-amber':
@@ -533,7 +709,7 @@ function getFilterString(template: ReelTemplate, slideProgress: number): string 
 
 function drawBlurredBackdrop(
   ctx: CanvasRenderingContext2D,
-  img: FrameImage,
+  img: FrameSource,
   w: number,
   h: number
 ): void {
@@ -545,8 +721,8 @@ function drawBlurredBackdrop(
 
 function drawStyledSlide(
   ctx: CanvasRenderingContext2D,
-  img: FrameImage,
-  secondaryImg: FrameImage | null,
+  img: FrameSource,
+  secondaryImg: FrameSource | null,
   w: number,
   h: number,
   progress: number,
@@ -672,13 +848,20 @@ function drawStyledSlide(
     );
     ctx.filter = 'none';
 
-    ctx.fillStyle = '#18181B';
-    ctx.textAlign = 'center';
-    ctx.font = `italic 600 ${Math.round(28 * s)}px "Cormorant Garamond", Georgia, serif`;
-    ctx.fillText((title || template.defaultTitle).slice(0, 28), w / 2, fy + photoH + 68 * s);
-    ctx.fillStyle = '#71717A';
-    ctx.font = `500 ${Math.round(14 * s)}px "JetBrains Mono", monospace`;
-    ctx.fillText((subtitle || template.defaultSubtitle).slice(0, 28), w / 2, fy + photoH + 100 * s);
+    const cleanTitle = title.trim();
+    const cleanSub = subtitle.trim();
+    if (cleanTitle) {
+      ctx.fillStyle = '#18181B';
+      ctx.textAlign = 'center';
+      ctx.font = `italic 600 ${Math.round(28 * s)}px "Cormorant Garamond", Georgia, serif`;
+      ctx.fillText(cleanTitle.slice(0, 28), w / 2, fy + photoH + 68 * s);
+    }
+    if (cleanSub) {
+      ctx.fillStyle = '#71717A';
+      ctx.textAlign = 'center';
+      ctx.font = `500 ${Math.round(14 * s)}px "JetBrains Mono", monospace`;
+      ctx.fillText(cleanSub.slice(0, 28), w / 2, fy + photoH + 100 * s);
+    }
     ctx.restore();
     return;
   }
@@ -1204,13 +1387,14 @@ function drawTemplateOverlay(
   ctx.globalAlpha = entrance;
 
   if (template.overlay === 'film-grain-date') {
-    ctx.textAlign = 'right';
-    ctx.font = `600 ${Math.round(22 * s)}px "JetBrains Mono", monospace`;
-    ctx.fillStyle = '#FB923C';
-    ctx.shadowColor = 'rgba(234, 88, 12, 0.75)';
-    ctx.shadowBlur = 10 * s;
-    const stamp = cleanSub || "'26 11 25";
-    ctx.fillText(stamp.toUpperCase(), w - 44 * s, h - 56 * s);
+    if (cleanSub) {
+      ctx.textAlign = 'right';
+      ctx.font = `600 ${Math.round(22 * s)}px "JetBrains Mono", monospace`;
+      ctx.fillStyle = '#FB923C';
+      ctx.shadowColor = 'rgba(234, 88, 12, 0.75)';
+      ctx.shadowBlur = 10 * s;
+      ctx.fillText(cleanSub.toUpperCase(), w - 44 * s, h - 56 * s);
+    }
 
     if (cleanTitle) {
       ctx.textAlign = 'left';
@@ -1247,37 +1431,44 @@ function drawTemplateOverlay(
       ctx.fillText((cleanTitle || cleanSub).toUpperCase(), 44 * s, h - 58 * s);
     }
   } else if (template.overlay === 'magazine-masthead') {
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#FFFFFF';
-    ctx.shadowColor = 'rgba(0,0,0,0.5)';
-    ctx.shadowBlur = 16 * s;
-    ctx.font = `700 ${Math.round(58 * s)}px "Cormorant Garamond", Georgia, serif`;
-    ctx.fillText((cleanTitle || template.defaultTitle).toUpperCase(), w / 2, 130 * s);
+    if (cleanTitle) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 16 * s;
+      ctx.font = `700 ${Math.round(58 * s)}px "Cormorant Garamond", Georgia, serif`;
+      ctx.fillText(cleanTitle.toUpperCase(), w / 2, 130 * s);
+    }
 
     if (cleanSub) {
+      ctx.textAlign = 'center';
       ctx.font = `500 ${Math.round(17 * s)}px "Plus Jakarta Sans", sans-serif`;
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.fillText(cleanSub.toUpperCase(), w / 2, h - 72 * s);
     }
   } else if (template.overlay === 'swiss-tag') {
-    const baseY = h - 105 * s;
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-    ctx.lineWidth = 1.5 * s;
-    ctx.beginPath();
-    ctx.moveTo(54 * s, baseY - 26 * s);
-    ctx.lineTo(w - 54 * s, baseY - 26 * s);
-    ctx.stroke();
+    if (cleanTitle || cleanSub) {
+      const baseY = h - 105 * s;
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = 1.5 * s;
+      ctx.beginPath();
+      ctx.moveTo(54 * s, baseY - 26 * s);
+      ctx.lineTo(w - 54 * s, baseY - 26 * s);
+      ctx.stroke();
 
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = `600 ${Math.round(28 * s)}px "Plus Jakarta Sans", sans-serif`;
-    ctx.fillText((cleanTitle || template.defaultTitle).toUpperCase(), 54 * s, baseY + 14 * s);
+      if (cleanTitle) {
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = `600 ${Math.round(28 * s)}px "Plus Jakarta Sans", sans-serif`;
+        ctx.fillText(cleanTitle.toUpperCase(), 54 * s, baseY + 14 * s);
+      }
 
-    if (cleanSub) {
-      ctx.textAlign = 'right';
-      ctx.fillStyle = 'rgba(228,228,231,0.78)';
-      ctx.font = `500 ${Math.round(16 * s)}px "JetBrains Mono", monospace`;
-      ctx.fillText(cleanSub.toUpperCase(), w - 54 * s, baseY + 12 * s);
+      if (cleanSub) {
+        ctx.textAlign = 'right';
+        ctx.fillStyle = 'rgba(228,228,231,0.78)';
+        ctx.font = `500 ${Math.round(16 * s)}px "JetBrains Mono", monospace`;
+        ctx.fillText(cleanSub.toUpperCase(), w - 54 * s, baseY + 12 * s);
+      }
     }
   } else if (template.overlay === 'neon-edge') {
     const pad = 28 * s;
@@ -1287,9 +1478,11 @@ function drawTemplateOverlay(
 
     if (cleanTitle || cleanSub) {
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = `700 ${Math.round(38 * s)}px "Plus Jakarta Sans", sans-serif`;
-      ctx.fillText((cleanTitle || '').toUpperCase(), w / 2, h - 120 * s);
+      if (cleanTitle) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = `700 ${Math.round(38 * s)}px "Plus Jakarta Sans", sans-serif`;
+        ctx.fillText(cleanTitle.toUpperCase(), w / 2, h - 120 * s);
+      }
       if (cleanSub) {
         ctx.fillStyle = '#C4B5FD';
         ctx.font = `500 ${Math.round(17 * s)}px "JetBrains Mono", monospace`;
@@ -1299,7 +1492,7 @@ function drawTemplateOverlay(
   } else if (template.overlay === 'frosted-pill') {
     if (cleanTitle || cleanSub) {
       const boxW = Math.min(w - 96 * s, 460 * s);
-      const boxH = cleanSub ? 104 * s : 68 * s;
+      const boxH = cleanTitle && cleanSub ? 104 * s : 68 * s;
       const bx = (w - boxW) / 2;
       const by = h - boxH - 64 * s;
 
@@ -1311,13 +1504,15 @@ function drawTemplateOverlay(
       ctx.stroke();
 
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = `600 ${Math.round(28 * s)}px "Plus Jakarta Sans", sans-serif`;
-      ctx.fillText(cleanTitle || template.defaultTitle, w / 2, by + 42 * s);
+      if (cleanTitle) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = `600 ${Math.round(28 * s)}px "Plus Jakarta Sans", sans-serif`;
+        ctx.fillText(cleanTitle, w / 2, by + 42 * s);
+      }
       if (cleanSub) {
         ctx.fillStyle = 'rgba(244, 244, 245, 0.78)';
         ctx.font = `400 ${Math.round(18 * s)}px "Plus Jakarta Sans", sans-serif`;
-        ctx.fillText(cleanSub, w / 2, by + 76 * s);
+        ctx.fillText(cleanSub, w / 2, by + (cleanTitle ? 76 : 42) * s);
       }
     }
   } else if (
@@ -1389,6 +1584,17 @@ function drawTemplateOverlay(
   }
 }
 
+function resolveDrawable(clip: RenderClip | undefined): FrameSource | null {
+  if (!clip) return null;
+  if (isVideoElement(clip.source)) {
+    if (clip.source.readyState >= 2 && clip.source.videoWidth > 0) {
+      return clip.source;
+    }
+    return clip.poster ?? null;
+  }
+  return clip.source;
+}
+
 /**
  * Unified deterministic frame renderer shared by BOTH live preview AND client-side MP4 export.
  */
@@ -1399,15 +1605,15 @@ export function renderFrame(
 ): void {
   const w = ctx.canvas.width;
   const h = ctx.canvas.height;
-  const { template, images, title, subtitle, pace } = config;
+  const { template, title, subtitle } = config;
   const s = w / 720;
 
   ctx.fillStyle = '#08080A';
   ctx.fillRect(0, 0, w, h);
 
-  if (images.length === 0) return;
+  const { introDur, segments } = getClipTimeline(config);
+  if (segments.length === 0) return;
 
-  const introDur = template.overlay === 'kinetic-intro' ? 1.0 : 0;
   if (introDur > 0 && timeSec < introDur) {
     const p = easeOutCubic(timeSec / introDur);
     ctx.fillStyle = '#08080A';
@@ -1418,45 +1624,56 @@ export function renderFrame(
     const scale = 0.88 + p * 0.14;
     ctx.scale(scale, scale);
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = `700 ${Math.round(78 * s)}px "Plus Jakarta Sans", sans-serif`;
-    ctx.fillText((title.trim() || template.defaultTitle).toUpperCase(), 0, -10 * s);
-    if (subtitle.trim() || template.defaultSubtitle) {
+    if (title.trim()) {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = `700 ${Math.round(78 * s)}px "Plus Jakarta Sans", sans-serif`;
+      ctx.fillText(title.trim().toUpperCase(), 0, -10 * s);
+    }
+    if (subtitle.trim()) {
       ctx.fillStyle = 'rgba(228,228,231,0.65)';
       ctx.font = `500 ${Math.round(20 * s)}px "JetBrains Mono", monospace`;
-      ctx.fillText((subtitle.trim() || template.defaultSubtitle).toUpperCase(), 0, 44 * s);
+      ctx.fillText(subtitle.trim().toUpperCase(), 0, 44 * s);
     }
     ctx.restore();
     return;
   }
 
-  const effectiveTime = Math.max(0, timeSec - introDur);
-  const slideDur = getSlideDuration(template, pace);
-  const count = images.length;
-  const maxContentTime = count * slideDur;
-  const clampedTime = Math.min(effectiveTime, maxContentTime - 0.0001);
+  const lastSeg = segments[segments.length - 1];
+  const clampedTime = Math.max(introDur, Math.min(timeSec, lastSeg.endSec - 0.0001));
 
-  const slideIdx = Math.floor(clampedTime / slideDur);
+  let slideIdx = segments.length - 1;
+  for (let i = 0; i < segments.length; i += 1) {
+    if (clampedTime < segments[i].endSec) {
+      slideIdx = i;
+      break;
+    }
+  }
+
+  const count = segments.length;
+  const seg = segments[slideIdx];
   const nextIdx = (slideIdx + 1) % count;
-  const localTime = clampedTime - slideIdx * slideDur;
-  const slideProgress = localTime / slideDur;
+  const nextSeg = segments[nextIdx];
+  const localTime = Math.max(0, clampedTime - seg.startSec);
+  const slideProgress = clamp01(localTime / seg.durationSec);
 
   const activeTransition = getEffectiveTransition(config);
   const transDur =
-    activeTransition === 'shutter-flash' || activeTransition === 'rgb-glitch'
-      ? Math.min(0.42, slideDur * 0.36)
-      : Math.min(0.62, slideDur * 0.42);
+    count > 1 && slideIdx < count - 1
+      ? getTransitionDuration(activeTransition, seg.durationSec, nextSeg.durationSec)
+      : 0;
 
-  const inTransition = count > 1 && slideIdx < count - 1 && localTime > slideDur - transDur;
-  const curImg = images[slideIdx];
-  const partnerImg = images[(slideIdx + 1) % count];
+  const inTransition =
+    transDur > 0 && count > 1 && slideIdx < count - 1 && localTime > seg.durationSec - transDur;
 
+  const curImg = resolveDrawable(seg.clip);
+  if (!curImg) return;
+  const partnerImg = resolveDrawable(segments[(slideIdx + 1) % count].clip);
   const landscapeTilt: LandscapeTilt = config.landscapeTilt ?? 'right';
 
   if (inTransition) {
-    const tRaw = clamp01((localTime - (slideDur - transDur)) / transDur);
-    const nextImg = images[nextIdx];
-    const nextPartner = images[(nextIdx + 1) % count];
+    const tRaw = clamp01((localTime - (seg.durationSec - transDur)) / transDur);
+    const nextImg = resolveDrawable(nextSeg.clip) ?? curImg;
+    const nextPartner = resolveDrawable(segments[(nextIdx + 1) % count].clip);
 
     const { fromCanvas, fromCtx, toCanvas, toCtx } = getTransitionBuffers(w, h);
     drawStyledSlide(fromCtx, curImg, partnerImg, w, h, slideProgress, slideIdx, template, title, subtitle, landscapeTilt);
@@ -1531,6 +1748,109 @@ export async function loadOrientedImage(source: File | string): Promise<FrameIma
       URL.revokeObjectURL(url);
     }
   }
+}
+
+export interface LoadedVideoAsset {
+  videoUrl: string;
+  duration: number;
+  width: number;
+  height: number;
+  posterUrl: string;
+}
+
+/**
+ * Loads a user-picked video File, extracts its duration & dimensions, and captures a first-frame poster.
+ */
+export async function loadVideoAsset(file: File): Promise<LoadedVideoAsset> {
+  const videoUrl = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.crossOrigin = 'anonymous';
+  video.src = videoUrl;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error('Video load timed out')), 12000);
+      const onLoaded = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const onError = () => {
+        window.clearTimeout(timer);
+        reject(new Error('Could not decode this video format on this device.'));
+      };
+      video.addEventListener('loadeddata', onLoaded, { once: true });
+      video.addEventListener('error', onError, { once: true });
+      video.load();
+    });
+
+    const duration =
+      Number.isFinite(video.duration) && video.duration > 0.3
+        ? Number(video.duration.toFixed(2))
+        : 5.0;
+    const width = video.videoWidth || 720;
+    const height = video.videoHeight || 1280;
+
+    // Seek briefly into the video to avoid pure-black opening fade frame
+    await seekVideoToTime(video, Math.min(0.18, duration * 0.1));
+
+    const thumbW = 240;
+    const thumbH = Math.max(120, Math.round((thumbW * height) / Math.max(1, width)));
+    const canvas = document.createElement('canvas');
+    canvas.width = thumbW;
+    canvas.height = thumbH;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, thumbW, thumbH);
+    }
+    const posterUrl = canvas.toDataURL('image/jpeg', 0.8);
+
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+
+    return { videoUrl, duration, width, height, posterUrl };
+  } catch (err) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(videoUrl);
+    throw err;
+  }
+}
+
+/**
+ * Creates a dedicated muted, inline HTMLVideoElement ready for frame-accurate preview & MP4 export.
+ */
+export async function createClipVideoElement(videoUrl: string, initialTimeSec = 0): Promise<HTMLVideoElement> {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.crossOrigin = 'anonymous';
+  video.src = videoUrl;
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => resolve(), 8000);
+    const onReady = () => {
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const onError = () => {
+      window.clearTimeout(timer);
+      reject(new Error('Failed to prepare video clip'));
+    };
+    video.addEventListener('loadeddata', onReady, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    video.load();
+  });
+
+  if (initialTimeSec > 0) {
+    await seekVideoToTime(video, initialTimeSec);
+  }
+  return video;
 }
 
 function getAdaptiveVideoBitrate(durationSec: number): number {
@@ -1626,6 +1946,10 @@ async function exportViaWebCodecsMp4(
     }
 
     const timeSec = frameIdx / fps;
+    const videoTargets = getActiveVideoTargets(timeSec, config);
+    if (videoTargets.length > 0) {
+      await Promise.all(videoTargets.map((t) => seekVideoToTime(t.video, t.targetTime)));
+    }
     renderFrame(ctx, timeSec, config);
 
     const videoFrame = new VideoFrame(canvas, {
@@ -1753,15 +2077,50 @@ async function exportViaMediaRecorder(
     recorder.start(200);
     const startMs = performance.now();
 
+    const syncMediaRecorderVideos = (elapsed: number) => {
+      const targets = getActiveVideoTargets(elapsed, config);
+      const activeSet = new Set(targets.map((t) => t.video));
+      if (config.clips) {
+        for (const c of config.clips) {
+          if (c.kind === 'video' && isVideoElement(c.source) && !activeSet.has(c.source)) {
+            if (!c.source.paused) c.source.pause();
+          }
+        }
+      }
+      for (const t of targets) {
+        if (Math.abs(t.video.currentTime - t.targetTime) > 0.25) {
+          try {
+            t.video.currentTime = t.targetTime;
+          } catch {
+            // ignore
+          }
+        }
+        if (t.video.paused) {
+          void t.video.play().catch(() => {});
+        }
+      }
+    };
+
+    const stopAllRecorderVideos = () => {
+      if (!config.clips) return;
+      for (const c of config.clips) {
+        if (c.kind === 'video' && isVideoElement(c.source) && !c.source.paused) {
+          c.source.pause();
+        }
+      }
+    };
+
     const step = (now: number) => {
       if (done) return;
       const elapsed = (now - startMs) / 1000;
       onProgress(Math.min(99, Math.round((elapsed / durationSec) * 100)));
       if (elapsed >= durationSec) {
+        stopAllRecorderVideos();
         renderFrame(ctx, durationSec - 0.01, config);
         if (recorder.state !== 'inactive') recorder.stop();
         return;
       }
+      syncMediaRecorderVideos(elapsed);
       renderFrame(ctx, elapsed, config);
       raf = requestAnimationFrame(step);
     };

@@ -5,6 +5,7 @@ export type PaceMode = 'fast' | 'normal' | 'slow';
 export type LandscapeTilt = 'right' | 'left';
 
 export type TransitionType =
+  | 'none'
   | 'hyper-zoom'
   | 'whip-pan'
   | 'whip-up'
@@ -26,6 +27,7 @@ export interface TransitionPreset {
 
 export const TRANSITION_PRESETS: TransitionPreset[] = [
   { id: 'auto', label: 'Template Auto' },
+  { id: 'none', label: 'None (Hard Cut)' },
   { id: 'hyper-zoom', label: 'Hyper Zoom' },
   { id: 'whip-pan', label: 'Whip Pan' },
   { id: 'spin-twist', label: 'Spin Twist' },
@@ -51,6 +53,7 @@ export type FrameLayout =
   | 'heritage-frame';
 
 export type GradePreset =
+  | 'none'
   | 'kodak-warm'
   | 'teal-amber'
   | 'clean-swiss'
@@ -127,6 +130,23 @@ export const PACE_SECONDS: Record<PaceMode, number> = {
   fast: 1.5,
   normal: 2.3,
   slow: 3.2,
+};
+
+export const BLANK_TEMPLATE: ReelTemplate = {
+  id: 'blank-canvas',
+  name: 'Blank Canvas',
+  category: 'vibes',
+  tagline: 'No text, no date stamp, no color filter — pure photos & video editing',
+  badge: 'Blank',
+  defaultTitle: '',
+  defaultSubtitle: '',
+  paceMultiplier: 1.0,
+  transition: 'none',
+  layout: 'full',
+  grade: 'none',
+  overlay: 'none',
+  accentColor: '#FFFFFF',
+  samplePhotos: [SAMPLE_MEDIA.travelCoast, SAMPLE_MEDIA.vibesCafe],
 };
 
 export const REEL_TEMPLATES: ReelTemplate[] = [

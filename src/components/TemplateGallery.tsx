@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, Check } from 'lucide-react';
+import { ArrowRight, Check, SquarePlus } from 'lucide-react';
 import {
+  BLANK_TEMPLATE,
   CATEGORIES,
   PaceMode,
   REEL_TEMPLATES,
@@ -174,7 +175,7 @@ function MiniPreviewCard({
               : 'bg-white/[0.06] text-zinc-100 border border-white/10 hover:bg-white/[0.12]'
           }`}
         >
-          <span>{isSelected ? 'Add Photos' : 'Use Style'}</span>
+          <span>{isSelected ? 'Open Editor' : 'Use Style'}</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
@@ -195,15 +196,56 @@ export function TemplateGallery({
     [activeCategory]
   );
 
+  const isBlankSelected = selectedTemplate.id === BLANK_TEMPLATE.id;
+
   return (
-    <section aria-label="Template catalog" className="space-y-6">
+    <section aria-label="Template catalog" className="space-y-5">
       <div className="space-y-1.5">
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white [text-wrap:balance]">
           Cinematic templates for Status &amp; Reels
         </h1>
         <p className="text-sm text-zinc-400">
-          25 silent 9:16 video edits · Add your favorite song directly in WhatsApp or Instagram.
+          Start blank with photos &amp; videos, or pick one of 25 silent 9:16 styles.
         </p>
+      </div>
+
+      {/* Start Blank Quick Card — always 1 tap away */}
+      <div
+        className={`rounded-2xl p-3.5 sm:p-4 border transition flex items-center justify-between gap-3 ${
+          isBlankSelected
+            ? 'bg-white/[0.06] border-white/60 ring-1 ring-white/25'
+            : 'bg-[#111114] border-white/10 hover:border-white/25'
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => onSelectTemplate(BLANK_TEMPLATE, false)}
+          className="flex items-center gap-3 text-left min-w-0 flex-1"
+        >
+          <div className="h-11 w-11 rounded-xl bg-white/[0.08] border border-white/15 flex items-center justify-center shrink-0 text-white">
+            {isBlankSelected ? <Check className="w-5 h-5" /> : <SquarePlus className="w-5 h-5" />}
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-white truncate">Blank Canvas</h2>
+              <span className="text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-zinc-200 shrink-0">
+                No Text · Clean
+              </span>
+            </div>
+            <p className="text-xs text-zinc-400 truncate mt-0.5">
+              Pure 9:16 editor for photos &amp; trimmed videos — zero filters or date stamps
+            </p>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onSelectTemplate(BLANK_TEMPLATE, true)}
+          className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 text-xs font-semibold flex items-center gap-1.5 shrink-0 transition whitespace-nowrap"
+        >
+          <span>Start Blank</span>
+          <ArrowRight className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       {/* Category segmented filter tabs */}
