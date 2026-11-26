@@ -38,6 +38,11 @@ export const PUBLIC_SETTING_KEYS = [
   'monetag_zone_id',
   'richads_pub_id',
   'gigapub_id',
+  'cleanads_rewarded_enabled',
+  'cleanads_rewarded_placement_id',
+  'cleanads_interstitial_enabled',
+  'cleanads_interstitial_placement_id',
+  'cleanads_test_mode',
 ] as const;
 
 export const EDITABLE_SETTING_KEYS = [

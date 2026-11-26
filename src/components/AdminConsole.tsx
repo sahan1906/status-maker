@@ -13,7 +13,7 @@ import {
   Settings,
   Webhook,
 } from 'lucide-react';
-import { AdProvider } from '../lib/adNetworks';
+import { AdProvider, extractCleanAdsPlacementId } from '../lib/adNetworks';
 
 interface AdminStats {
   totalUsers: number;
@@ -31,6 +31,11 @@ interface AdminSettings {
   monetag_zone_id: string;
   richads_pub_id: string;
   gigapub_id: string;
+  cleanads_rewarded_enabled: boolean;
+  cleanads_rewarded_placement_id: string;
+  cleanads_interstitial_enabled: boolean;
+  cleanads_interstitial_placement_id: string;
+  cleanads_test_mode: boolean;
   bot_token_configured: boolean;
   bot_token_masked: string;
 }
@@ -52,6 +57,11 @@ const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
   monetag_zone_id: '',
   richads_pub_id: '',
   gigapub_id: '',
+  cleanads_rewarded_enabled: false,
+  cleanads_rewarded_placement_id: '',
+  cleanads_interstitial_enabled: false,
+  cleanads_interstitial_placement_id: '',
+  cleanads_test_mode: false,
   bot_token_configured: false,
   bot_token_masked: '',
 };
@@ -216,6 +226,15 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
         monetag_zone_id: settings.monetag_zone_id,
         richads_pub_id: settings.richads_pub_id,
         gigapub_id: settings.gigapub_id,
+        cleanads_rewarded_enabled: settings.cleanads_rewarded_enabled,
+        cleanads_rewarded_placement_id: extractCleanAdsPlacementId(
+          settings.cleanads_rewarded_placement_id
+        ),
+        cleanads_interstitial_enabled: settings.cleanads_interstitial_enabled,
+        cleanads_interstitial_placement_id: extractCleanAdsPlacementId(
+          settings.cleanads_interstitial_placement_id
+        ),
+        cleanads_test_mode: settings.cleanads_test_mode,
       };
       if (newBotToken.trim()) {
         payload.bot_token = newBotToken.trim();
@@ -534,7 +553,16 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                 <Activity className="w-4 h-4 text-zinc-300" />
                 <span>
                   Bot Token: <strong className="text-zinc-200">{settings.bot_token_configured ? settings.bot_token_masked : 'Not configured'}</strong> ·
-                  Ad Gate: <strong className="text-zinc-200">{settings.reward_ad_enabled ? settings.ad_provider : 'Disabled'}</strong>
+                  Ad Gate: <strong className="text-zinc-200">
+                    {settings.cleanads_rewarded_enabled && settings.reward_ad_enabled
+                      ? `CleanAds + ${settings.ad_provider}`
+                      : settings.cleanads_rewarded_enabled
+                      ? 'CleanAds'
+                      : settings.reward_ad_enabled
+                      ? settings.ad_provider
+                      : 'Disabled'}
+                  </strong>
+                  {settings.cleanads_interstitial_enabled ? ' · CleanAds Interstitial On' : ''}
                 </span>
               </div>
               <button
@@ -737,6 +765,130 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                       className="w-full min-h-[44px] px-3 text-sm font-mono rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
                     />
                   </label>
+                </div>
+              </div>
+
+              {/* CleanAds Monetization (Rewarded + Interstitial) */}
+              <div className="md:col-span-2 rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-white">CleanAds Monetization</h2>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      Paste your <code className="font-mono text-zinc-300">pl_...</code> Placement ID or full CleanAds snippet — the ID is extracted automatically.
+                    </p>
+                  </div>
+
+                  <label className="flex items-center gap-2.5 cursor-pointer">
+                    <span className="text-xs text-zinc-300">Test Mode</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.cleanads_test_mode}
+                      onChange={(e) =>
+                        setSettings((s) => ({ ...s, cleanads_test_mode: e.target.checked }))
+                      }
+                      className="h-5 w-5 accent-white rounded"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  {/* CleanAds Rewarded Unit */}
+                  <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-3">
+                    <label className="flex items-center justify-between gap-3 cursor-pointer">
+                      <div>
+                        <span className="text-xs font-semibold text-white block">
+                          CleanAds Rewarded
+                        </span>
+                        <span className="text-[11px] text-zinc-400">
+                          Shown when tapping Download Video (falls back on no-fill)
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.cleanads_rewarded_enabled}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cleanads_rewarded_enabled: e.target.checked,
+                          }))
+                        }
+                        className="h-5 w-5 accent-white rounded shrink-0"
+                      />
+                    </label>
+
+                    <label className="block space-y-1.5">
+                      <span className="text-xs text-zinc-400">Rewarded Placement ID</span>
+                      <input
+                        type="text"
+                        value={settings.cleanads_rewarded_placement_id}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cleanads_rewarded_placement_id: e.target.value,
+                          }))
+                        }
+                        onBlur={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cleanads_rewarded_placement_id: extractCleanAdsPlacementId(
+                              e.target.value
+                            ),
+                          }))
+                        }
+                        placeholder="pl_..."
+                        className="w-full min-h-[44px] px-3 text-sm font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                      />
+                    </label>
+                  </div>
+
+                  {/* CleanAds Interstitial Unit */}
+                  <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-3">
+                    <label className="flex items-center justify-between gap-3 cursor-pointer">
+                      <div>
+                        <span className="text-xs font-semibold text-white block">
+                          CleanAds Interstitial
+                        </span>
+                        <span className="text-[11px] text-zinc-400">
+                          Shown naturally after exports or starting a new project (90s cooldown)
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.cleanads_interstitial_enabled}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cleanads_interstitial_enabled: e.target.checked,
+                          }))
+                        }
+                        className="h-5 w-5 accent-white rounded shrink-0"
+                      />
+                    </label>
+
+                    <label className="block space-y-1.5">
+                      <span className="text-xs text-zinc-400">Interstitial Placement ID</span>
+                      <input
+                        type="text"
+                        value={settings.cleanads_interstitial_placement_id}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cleanads_interstitial_placement_id: e.target.value,
+                          }))
+                        }
+                        onBlur={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cleanads_interstitial_placement_id: extractCleanAdsPlacementId(
+                              e.target.value
+                            ),
+                          }))
+                        }
+                        placeholder="pl_..."
+                        className="w-full min-h-[44px] px-3 text-sm font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>

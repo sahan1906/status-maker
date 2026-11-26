@@ -16,7 +16,10 @@ import {
 import {
   DEFAULT_APP_CONFIG,
   fetchPublicAppConfig,
+  getActiveRewardAdLabel,
+  preloadCleanAdsSdk,
   PublicAppConfig,
+  runInterstitialAd,
   runRewardedAd,
   shouldTriggerRewardAd,
 } from './lib/adNetworks';
@@ -79,7 +82,9 @@ export default function App() {
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
   const [awaitingAdConfirm, setAwaitingAdConfirm] = useState(false);
   const [isRunningAd, setIsRunningAd] = useState(false);
+  const [isRunningInterstitial, setIsRunningInterstitial] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const hasCompletedExportRef = useRef(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportedVideo, setExportedVideo] = useState<ExportVideoResult | null>(null);
@@ -115,6 +120,35 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, [refreshConfig]);
 
+  // Preload CleanAds SDK once on startup when either CleanAds unit is enabled
+  useEffect(() => {
+    preloadCleanAdsSdk(appConfig);
+  }, [appConfig]);
+
+  const muteAndPauseDomMedia = useCallback(() => {
+    if (typeof document === 'undefined') return;
+    document.querySelectorAll('video, audio').forEach((el) => {
+      const media = el as HTMLMediaElement;
+      try {
+        media.muted = true;
+        media.pause();
+      } catch {
+        // Ignore media pause errors
+      }
+    });
+  }, []);
+
+  const triggerInterstitialWithCooldown = useCallback(async () => {
+    if (isRunningAd || isRunningInterstitial || isExporting) return;
+    muteAndPauseDomMedia();
+    setIsRunningInterstitial(true);
+    try {
+      await runInterstitialAd(appConfig);
+    } finally {
+      setIsRunningInterstitial(false);
+    }
+  }, [appConfig, isExporting, isRunningAd, isRunningInterstitial, muteAndPauseDomMedia]);
+
   // Decode EXIF-oriented ImageBitmaps whenever photo list updates
   useEffect(() => {
     let cancelled = false;
@@ -149,6 +183,7 @@ export default function App() {
 
   const handleSelectTemplate = (tpl: ReelTemplate, openEditor = false) => {
     haptic('light');
+    const isStartingNewProject = openEditor && (hasCompletedExportRef.current || tpl.id !== selectedTemplate.id);
     setSelectedTemplate(tpl);
     setTitle(tpl.defaultTitle);
     setSubtitle(tpl.defaultSubtitle);
@@ -158,6 +193,9 @@ export default function App() {
     setTelegramSendStatus(null);
     if (openEditor) {
       setView('edit');
+      if (isStartingNewProject && hasCompletedExportRef.current) {
+        void triggerInterstitialWithCooldown();
+      }
     }
   };
 
@@ -289,6 +327,7 @@ export default function App() {
       });
 
       setExportedVideo(result);
+      hasCompletedExportRef.current = true;
       haptic('success');
       if (!tgContext.isTelegram) {
         triggerBrowserDownload(result);
@@ -309,12 +348,13 @@ export default function App() {
     haptic('medium');
 
     if (shouldTriggerRewardAd(appConfig)) {
+      muteAndPauseDomMedia();
       setIsRunningAd(true);
       const adResult = await runRewardedAd(appConfig);
       setIsRunningAd(false);
       if (adResult === 'cancelled') {
         setAwaitingAdConfirm(true);
-        setExportError('Please watch the full ad to unlock your HD video download.');
+        setExportError('Please finish watching the short ad to unlock your HD video download.');
         return;
       }
     }
@@ -547,12 +587,8 @@ export default function App() {
     );
   }
 
-  const adProviderNames: Record<PublicAppConfig['ad_provider'], string> = {
-    adsgram: 'AdsGram',
-    monetag: 'Monetag',
-    richads: 'RichAds',
-    gigapub: 'GigaPub',
-  };
+  const activeAdLabel = getActiveRewardAdLabel(appConfig);
+  const isAnyAdOpen = isRunningAd || isRunningInterstitial;
 
   return (
     <div
@@ -697,6 +733,7 @@ export default function App() {
                   watermarkEnabled={appConfig.watermark_enabled}
                   watermarkText={appConfig.watermark_text}
                   isExporting={isExporting}
+                  pausePlayback={isAnyAdOpen}
                 />
               </div>
             </aside>
@@ -720,6 +757,7 @@ export default function App() {
               watermarkEnabled={appConfig.watermark_enabled}
               watermarkText={appConfig.watermark_text}
               isExporting={isExporting}
+              pausePlayback={isAnyAdOpen}
               fillViewport
             />
           </div>
@@ -821,7 +859,7 @@ export default function App() {
       <DownloadVideoModal
         open={downloadModalOpen}
         templateName={selectedTemplate.name}
-        adProviderLabel={adProviderNames[appConfig.ad_provider]}
+        adProviderLabel={activeAdLabel}
         isTelegram={tgContext.isTelegram}
         awaitingAdConfirm={awaitingAdConfirm}
         isRunningAd={isRunningAd}
@@ -842,9 +880,13 @@ export default function App() {
         }}
         onCancelExport={() => exportAbortRef.current?.abort()}
         onClose={() => {
+          const finishedExport = Boolean(exportedVideo);
           setAwaitingAdConfirm(false);
           setDownloadNotice(null);
           setDownloadModalOpen(false);
+          if (finishedExport) {
+            void triggerInterstitialWithCooldown();
+          }
         }}
         onSendToTelegramChat={handleSendToTelegramChat}
         onNativeShare={handleNativeShare}

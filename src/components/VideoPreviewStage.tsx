@@ -19,6 +19,7 @@ interface VideoPreviewStageProps {
   watermarkEnabled: boolean;
   watermarkText: string;
   isExporting: boolean;
+  pausePlayback?: boolean;
   fillViewport?: boolean;
 }
 
@@ -33,6 +34,7 @@ export function VideoPreviewStage({
   watermarkEnabled,
   watermarkText,
   isExporting,
+  pausePlayback = false,
   fillViewport = false,
 }: VideoPreviewStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -78,7 +80,7 @@ export function VideoPreviewStage({
       lastMs = now;
       const dur = getTotalDuration(configRef.current);
 
-      if (isPlaying && !isExporting) {
+      if (isPlaying && !isExporting && !pausePlayback) {
         timeRef.current = (timeRef.current + dt) % dur;
       } else if (timeRef.current >= dur) {
         timeRef.current = 0;
@@ -100,7 +102,7 @@ export function VideoPreviewStage({
 
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [isPlaying, isExporting, isFullscreen]);
+  }, [isPlaying, isExporting, pausePlayback, isFullscreen]);
 
   const handleRestart = () => {
     timeRef.current = 0;

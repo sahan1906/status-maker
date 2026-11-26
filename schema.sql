@@ -26,4 +26,9 @@ INSERT OR IGNORE INTO app_settings (key, value) VALUES
   ('adsgram_block_id', ''),
   ('monetag_zone_id', ''),
   ('richads_pub_id', ''),
-  ('gigapub_id', '');
+  ('gigapub_id', ''),
+  ('cleanads_rewarded_enabled', 'false'),
+  ('cleanads_rewarded_placement_id', ''),
+  ('cleanads_interstitial_enabled', 'false'),
+  ('cleanads_interstitial_placement_id', ''),
+  ('cleanads_test_mode', 'false');

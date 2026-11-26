@@ -14,6 +14,11 @@ export const onRequestGet: PagesHandler = async ({ env }) => {
       monetag_zone_id: map.monetag_zone_id || '',
       richads_pub_id: map.richads_pub_id || '',
       gigapub_id: map.gigapub_id || '',
+      cleanads_rewarded_enabled: (map.cleanads_rewarded_enabled ?? 'false') === 'true',
+      cleanads_rewarded_placement_id: map.cleanads_rewarded_placement_id || '',
+      cleanads_interstitial_enabled: (map.cleanads_interstitial_enabled ?? 'false') === 'true',
+      cleanads_interstitial_placement_id: map.cleanads_interstitial_placement_id || '',
+      cleanads_test_mode: (map.cleanads_test_mode ?? 'false') === 'true',
     };
 
     // Ensure only allowlisted public keys are exposed
@@ -34,6 +39,11 @@ export const onRequestGet: PagesHandler = async ({ env }) => {
       monetag_zone_id: '',
       richads_pub_id: '',
       gigapub_id: '',
+      cleanads_rewarded_enabled: false,
+      cleanads_rewarded_placement_id: '',
+      cleanads_interstitial_enabled: false,
+      cleanads_interstitial_placement_id: '',
+      cleanads_test_mode: false,
     });
   }
 };
