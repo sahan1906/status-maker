@@ -181,9 +181,12 @@ export default function App() {
     };
   }, [exportedVideo]);
 
+  const hasOpenedEditorRef = useRef(false);
+
   const handleSelectTemplate = (tpl: ReelTemplate, openEditor = false) => {
     haptic('light');
-    const isStartingNewProject = openEditor && (hasCompletedExportRef.current || tpl.id !== selectedTemplate.id);
+    const isSwitchingProject =
+      openEditor && (hasCompletedExportRef.current || (hasOpenedEditorRef.current && tpl.id !== selectedTemplate.id));
     setSelectedTemplate(tpl);
     setTitle(tpl.defaultTitle);
     setSubtitle(tpl.defaultSubtitle);
@@ -192,8 +195,9 @@ export default function App() {
     setExportedVideo(null);
     setTelegramSendStatus(null);
     if (openEditor) {
+      hasOpenedEditorRef.current = true;
       setView('edit');
-      if (isStartingNewProject && hasCompletedExportRef.current) {
+      if (isSwitchingProject) {
         void triggerInterstitialWithCooldown();
       }
     }

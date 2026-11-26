@@ -156,34 +156,48 @@ function loadExternalScript(src: string, attrs?: Record<string, string>): Promis
   if (existingPromise) return existingPromise;
 
   const existingTag = document.querySelector(`script[src="${src}"]`) as HTMLScriptElement | null;
-  if (existingTag && existingTag.dataset.loaded === 'true') {
-    return Promise.resolve();
+  if (existingTag) {
+    if (existingTag.dataset.loaded === 'true') {
+      return Promise.resolve();
+    }
+    // If a static <script defer> tag from index.html already finished executing (or failed)
+    // before this helper ran, remove stale tag so we can load cleanly without hanging forever.
+    if (existingTag.dataset.dynamic !== 'true') {
+      existingTag.remove();
+    }
   }
 
   const promise = new Promise<void>((resolve, reject) => {
-    const script = existingTag || document.createElement('script');
-    if (!existingTag) {
-      script.src = src;
-      script.async = true;
-      if (attrs) {
-        for (const [k, v] of Object.entries(attrs)) {
-          script.setAttribute(k, v);
-        }
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.dynamic = 'true';
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        script.setAttribute(k, v);
       }
-      document.head.appendChild(script);
     }
 
+    const timeoutId = window.setTimeout(() => {
+      scriptLoadPromises.delete(src);
+      reject(new Error(`Timed out loading ${src}`));
+    }, 10_000);
+
     const onLoad = () => {
+      window.clearTimeout(timeoutId);
       script.dataset.loaded = 'true';
       resolve();
     };
     const onError = () => {
+      window.clearTimeout(timeoutId);
       scriptLoadPromises.delete(src);
+      script.remove();
       reject(new Error(`Failed to load ${src}`));
     };
 
     script.addEventListener('load', onLoad, { once: true });
     script.addEventListener('error', onError, { once: true });
+    document.head.appendChild(script);
   });
 
   scriptLoadPromises.set(src, promise);
@@ -216,20 +230,25 @@ function isUserClosedReason(value: unknown): boolean {
 
 type SingleAdOutcome = 'completed' | 'cancelled' | 'no_fill_or_error';
 
-async function runCleanAdsUnit(
+interface CleanAdsOutcomeDetail {
+  outcome: SingleAdOutcome;
+  reason?: string;
+}
+
+async function runCleanAdsUnitDetailed(
   rawPlacementId: string,
   testMode: boolean,
   isRewarded: boolean
-): Promise<SingleAdOutcome> {
+): Promise<CleanAdsOutcomeDetail> {
   const placementId = extractCleanAdsPlacementId(rawPlacementId);
-  if (!placementId) return 'no_fill_or_error';
+  if (!placementId) return { outcome: 'no_fill_or_error', reason: 'missing_placement_id' };
 
   try {
     if (!window.CleanAds?.init) {
       await loadExternalScript(CLEANADS_SDK_URL);
     }
     if (!window.CleanAds?.init) {
-      return 'no_fill_or_error';
+      return { outcome: 'no_fill_or_error', reason: 'sdk_unavailable' };
     }
 
     const ad = window.CleanAds.init({
@@ -243,39 +262,88 @@ async function runCleanAdsUnit(
     if (result && typeof result === 'object') {
       if (isRewarded) {
         if (isUserClosedReason(result.reason) || isUserClosedReason(result.code)) {
-          return 'cancelled';
+          return { outcome: 'cancelled', reason: String(result.reason || result.code) };
         }
         if (result.completed === false || result.rewarded === false) {
+          const reasonText = String(result.reason || result.error || '');
           if (
-            String(result.reason || result.error || '').toLowerCase().includes('no_fill') ||
-            String(result.reason || result.error || '').toLowerCase().includes('network')
+            reasonText.toLowerCase().includes('no_fill') ||
+            reasonText.toLowerCase().includes('network')
           ) {
-            return 'no_fill_or_error';
+            return { outcome: 'no_fill_or_error', reason: reasonText || 'no_fill' };
           }
-          return 'cancelled';
+          return { outcome: 'cancelled', reason: reasonText || 'closed_early' };
         }
         if (result.error) {
-          return 'no_fill_or_error';
+          return { outcome: 'no_fill_or_error', reason: String(result.error) };
         }
       }
     }
 
-    return 'completed';
+    return { outcome: 'completed' };
   } catch (err) {
-    if (isRewarded && err && typeof err === 'object') {
+    let reason = 'unknown_error';
+    if (err && typeof err === 'object') {
       const rec = err as Record<string, unknown>;
+      reason = String(rec.reason || rec.code || rec.message || 'unknown_error');
       if (
-        isUserClosedReason(rec.reason) ||
-        isUserClosedReason(rec.code) ||
-        isUserClosedReason(rec.message)
+        isRewarded &&
+        (isUserClosedReason(rec.reason) ||
+          isUserClosedReason(rec.code) ||
+          isUserClosedReason(rec.message))
       ) {
-        return 'cancelled';
+        return { outcome: 'cancelled', reason };
       }
-    } else if (isRewarded && typeof err === 'string' && isUserClosedReason(err)) {
-      return 'cancelled';
+    } else if (typeof err === 'string') {
+      reason = err;
+      if (isRewarded && isUserClosedReason(err)) {
+        return { outcome: 'cancelled', reason };
+      }
     }
-    return 'no_fill_or_error';
+    console.warn(`[ReelCraft CleanAds] placement=${placementId} test=${testMode} failed: ${reason}`);
+    return { outcome: 'no_fill_or_error', reason };
   }
+}
+
+/**
+ * Direct diagnostic runner for the Admin Console so admins can verify their CleanAds placement
+ * and see exact SDK feedback (e.g., no_fill, http_404, closed_early, or completed).
+ */
+export async function testCleanAdsPlacement(
+  rawPlacementId: string,
+  testMode: boolean,
+  isRewarded: boolean
+): Promise<{ ok: boolean; message: string }> {
+  const placementId = extractCleanAdsPlacementId(rawPlacementId);
+  if (!placementId) {
+    return { ok: false, message: 'Enter a CleanAds Placement ID (pl_...) first.' };
+  }
+
+  const { outcome, reason } = await runCleanAdsUnitDetailed(placementId, testMode, isRewarded);
+  if (outcome === 'completed') {
+    return { ok: true, message: `CleanAds ad displayed & completed (${placementId}).` };
+  }
+  if (outcome === 'cancelled') {
+    return { ok: true, message: `CleanAds ad opened and was closed early (${reason || 'closed_early'}).` };
+  }
+  if (reason === 'no_fill') {
+    return {
+      ok: false,
+      message: testMode
+        ? 'CleanAds returned no_fill even in Test Mode — check that the placement ID is active.'
+        : 'CleanAds returned no_fill (no live ad available right now). Enable Test Mode to preview ads.',
+    };
+  }
+  if (reason === 'banner_placement_use_banner()') {
+    return {
+      ok: false,
+      message: 'That Placement ID is a Banner unit. Create a Rewarded or Interstitial placement in CleanAds.',
+    };
+  }
+  return {
+    ok: false,
+    message: `CleanAds returned "${reason || 'error'}" for ${placementId}. Verify the Placement ID and ad blocker settings.`,
+  };
 }
 
 async function runLegacyProvider(config: PublicAppConfig): Promise<SingleAdOutcome> {
@@ -366,11 +434,13 @@ export async function runRewardedAd(
   for (const slot of queue) {
     const outcome =
       slot === 'cleanads'
-        ? await runCleanAdsUnit(
-            config.cleanads_rewarded_placement_id,
-            config.cleanads_test_mode,
-            true
-          )
+        ? (
+            await runCleanAdsUnitDetailed(
+              config.cleanads_rewarded_placement_id,
+              config.cleanads_test_mode,
+              true
+            )
+          ).outcome
         : await runLegacyProvider(config);
 
     if (outcome === 'completed') {
@@ -391,6 +461,7 @@ export async function runRewardedAd(
 /**
  * Triggers CleanAds Interstitial cleanly with cooldown enforcement so users are never spammed
  * back-to-back (e.g., after finishing an export or starting a new template/project).
+ * Cooldown is only recorded when an ad actually shows (not on no_fill/network error).
  */
 export async function runInterstitialAd(config: PublicAppConfig): Promise<boolean> {
   if (!isCleanAdsInterstitialActive(config)) return false;
@@ -400,13 +471,16 @@ export async function runInterstitialAd(config: PublicAppConfig): Promise<boolea
     return false;
   }
 
-  lastAdShownAt = now;
-  const outcome = await runCleanAdsUnit(
+  const { outcome } = await runCleanAdsUnitDetailed(
     config.cleanads_interstitial_placement_id,
     config.cleanads_test_mode,
     false
   );
-  return outcome === 'completed';
+  if (outcome === 'completed') {
+    lastAdShownAt = Date.now();
+    return true;
+  }
+  return false;
 }
 
 export async function fetchPublicAppConfig(): Promise<PublicAppConfig> {

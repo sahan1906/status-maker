@@ -13,7 +13,11 @@ import {
   Settings,
   Webhook,
 } from 'lucide-react';
-import { AdProvider, extractCleanAdsPlacementId } from '../lib/adNetworks';
+import {
+  AdProvider,
+  extractCleanAdsPlacementId,
+  testCleanAdsPlacement,
+} from '../lib/adNetworks';
 
 interface AdminStats {
   totalUsers: number;
@@ -89,6 +93,10 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
 
   const [webhookLoading, setWebhookLoading] = useState(false);
   const [webhookMsg, setWebhookMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testingCleanAds, setTestingCleanAds] = useState<'rewarded' | 'interstitial' | null>(null);
+  const [cleanAdsTestMsg, setCleanAdsTestMsg] = useState<{ ok: boolean; text: string } | null>(
+    null
+  );
 
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [broadcasting, setBroadcasting] = useState(false);
@@ -287,6 +295,25 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
       setWebhookMsg({ ok: false, text: 'Network error while setting webhook.' });
     } finally {
       setWebhookLoading(false);
+    }
+  };
+
+  const handleTestCleanAds = async (kind: 'rewarded' | 'interstitial') => {
+    setTestingCleanAds(kind);
+    setCleanAdsTestMsg(null);
+    try {
+      const placementId =
+        kind === 'rewarded'
+          ? settings.cleanads_rewarded_placement_id
+          : settings.cleanads_interstitial_placement_id;
+      const res = await testCleanAdsPlacement(
+        placementId,
+        settings.cleanads_test_mode,
+        kind === 'rewarded'
+      );
+      setCleanAdsTestMsg({ ok: res.ok, text: res.message });
+    } finally {
+      setTestingCleanAds(null);
     }
   };
 
@@ -839,6 +866,16 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                         className="w-full min-h-[44px] px-3 text-sm font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
                       />
                     </label>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTestCleanAds('rewarded')}
+                      disabled={testingCleanAds !== null}
+                      className="min-h-[38px] w-full px-3 text-xs font-medium rounded-lg bg-white/[0.06] border border-white/10 text-zinc-200 hover:bg-white/[0.12] disabled:opacity-50 flex items-center justify-center gap-1.5 transition"
+                    >
+                      {testingCleanAds === 'rewarded' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <span>Test Rewarded Ad</span>
+                    </button>
                   </div>
 
                   {/* CleanAds Interstitial Unit */}
@@ -888,8 +925,30 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                         className="w-full min-h-[44px] px-3 text-sm font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
                       />
                     </label>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTestCleanAds('interstitial')}
+                      disabled={testingCleanAds !== null}
+                      className="min-h-[38px] w-full px-3 text-xs font-medium rounded-lg bg-white/[0.06] border border-white/10 text-zinc-200 hover:bg-white/[0.12] disabled:opacity-50 flex items-center justify-center gap-1.5 transition"
+                    >
+                      {testingCleanAds === 'interstitial' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <span>Test Interstitial Ad</span>
+                    </button>
                   </div>
                 </div>
+
+                {cleanAdsTestMsg && (
+                  <p
+                    className={`text-xs px-3.5 py-2.5 rounded-xl border ${
+                      cleanAdsTestMsg.ok
+                        ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+                        : 'bg-amber-500/10 border-amber-500/25 text-amber-200'
+                    }`}
+                  >
+                    {cleanAdsTestMsg.text}
+                  </p>
+                )}
               </div>
             </div>
           </form>
