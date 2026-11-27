@@ -46,13 +46,13 @@ export const PUBLIC_SETTING_KEYS = [
   'shorts_ad_enabled',
   'shorts_ad_every_n',
   'shorts_download_ad_enabled',
-  'shorts_api_base_url',
   'telegram_bot_username',
   'telegram_miniapp_short_name',
 ] as const;
 
 export const EDITABLE_SETTING_KEYS = [
   ...PUBLIC_SETTING_KEYS,
+  'shorts_channel_id',
   'bot_token',
 ] as const;
 

@@ -60,39 +60,58 @@ export function readTelegramStartParam(): string {
   }
 }
 
-export function getInitialShortsRouteState(): {
-  isShorts: boolean;
+export interface InitialEditsRouteState {
+  isEdits: boolean;
   initialVideoId: string;
-} {
+  initialTemplateId: string;
+}
+
+export function getInitialEditsRouteState(): InitialEditsRouteState {
   if (typeof window === 'undefined') {
-    return { isShorts: false, initialVideoId: '' };
+    return { isEdits: false, initialVideoId: '', initialTemplateId: '' };
   }
 
   const pathname = window.location.pathname.replace(/\/+$/, '');
   const params = new URLSearchParams(window.location.search);
   const startParam = readTelegramStartParam();
 
-  if (startParam === 'shorts') {
-    return { isShorts: true, initialVideoId: '' };
+  if (startParam === 'edits' || startParam === 'shorts') {
+    return { isEdits: true, initialVideoId: '', initialTemplateId: '' };
+  }
+  if (startParam.startsWith('edit_') && startParam.length > 5) {
+    return { isEdits: true, initialVideoId: startParam.slice(5).trim(), initialTemplateId: '' };
   }
   if (startParam.startsWith('short_') && startParam.length > 6) {
-    return { isShorts: true, initialVideoId: startParam.slice(6).trim() };
+    return { isEdits: true, initialVideoId: startParam.slice(6).trim(), initialTemplateId: '' };
   }
-  if (pathname === '/shorts') {
-    return { isShorts: true, initialVideoId: (params.get('v') || '').trim() };
+  if (startParam.startsWith('tpl_') && startParam.length > 4) {
+    return { isEdits: true, initialVideoId: '', initialTemplateId: startParam.slice(4).trim() };
+  }
+  if (pathname === '/edits' || pathname === '/shorts') {
+    return {
+      isEdits: true,
+      initialVideoId: (params.get('v') || '').trim(),
+      initialTemplateId: (params.get('t') || '').trim(),
+    };
   }
 
-  return { isShorts: false, initialVideoId: '' };
+  return { isEdits: false, initialVideoId: '', initialTemplateId: '' };
 }
 
-export function buildShortsTelegramDirectLink(
+export function buildEditsTelegramDirectLink(
   botUsername: string,
   miniAppShortName: string,
-  videoId?: string
+  target?: { videoId?: string; templateId?: string }
 ): string {
   const cleanBot = (botUsername || '').replace(/^@+/, '').trim();
   const cleanApp = (miniAppShortName || '').trim();
-  const startVal = videoId ? `short_${videoId}` : 'shorts';
+  const videoId = target?.videoId?.trim() || '';
+  const templateId = target?.templateId?.trim() || '';
+  const startVal = templateId
+    ? `tpl_${templateId}`
+    : videoId
+      ? `edit_${videoId}`
+      : 'edits';
 
   if (cleanBot) {
     if (cleanApp) {
@@ -101,10 +120,16 @@ export function buildShortsTelegramDirectLink(
     return `https://t.me/${cleanBot}?startapp=${encodeURIComponent(startVal)}`;
   }
 
+  const query = templateId
+    ? `?t=${encodeURIComponent(templateId)}`
+    : videoId
+      ? `?v=${encodeURIComponent(videoId)}`
+      : '';
+
   if (typeof window !== 'undefined') {
-    return `${window.location.origin}/shorts${videoId ? `?v=${encodeURIComponent(videoId)}` : ''}`;
+    return `${window.location.origin}/edits${query}`;
   }
-  return `/shorts${videoId ? `?v=${encodeURIComponent(videoId)}` : ''}`;
+  return `/edits${query}`;
 }
 
 export function openTelegramShareUrl(shareUrl: string, text: string): boolean {

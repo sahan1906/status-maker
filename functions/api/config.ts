@@ -2,23 +2,9 @@ import { getAllSettingsMap, jsonResponse } from '../_lib/security';
 import { PagesHandler, PUBLIC_SETTING_KEYS } from '../_lib/types';
 
 function parseShortsEveryN(raw?: string): number {
-  const n = Number.parseInt(raw || '5', 10);
-  if (!Number.isFinite(n)) return 5;
-  return Math.max(3, Math.min(10, n));
-}
-
-function normalizeShortsBaseUrl(raw?: string): string {
-  const trimmed = (raw || '').trim().replace(/\/+$/, '');
-  if (!trimmed) return 'https://pulse-shorts.pages.dev';
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol === 'https:') {
-      return parsed.origin;
-    }
-  } catch {
-    // Fallback to default
-  }
-  return 'https://pulse-shorts.pages.dev';
+  const n = Number.parseInt(raw || '1', 10);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(10, n));
 }
 
 export const onRequestGet: PagesHandler = async ({ env }) => {
@@ -42,7 +28,6 @@ export const onRequestGet: PagesHandler = async ({ env }) => {
       shorts_ad_enabled: (map.shorts_ad_enabled ?? 'true') === 'true',
       shorts_ad_every_n: parseShortsEveryN(map.shorts_ad_every_n),
       shorts_download_ad_enabled: (map.shorts_download_ad_enabled ?? 'true') === 'true',
-      shorts_api_base_url: normalizeShortsBaseUrl(map.shorts_api_base_url),
       telegram_bot_username: (map.telegram_bot_username || '').replace(/^@+/, '').trim(),
       telegram_miniapp_short_name: (map.telegram_miniapp_short_name || '').trim(),
     };
@@ -73,7 +58,6 @@ export const onRequestGet: PagesHandler = async ({ env }) => {
       shorts_ad_enabled: true,
       shorts_ad_every_n: 5,
       shorts_download_ad_enabled: true,
-      shorts_api_base_url: 'https://pulse-shorts.pages.dev',
       telegram_bot_username: '',
       telegram_miniapp_short_name: '',
     });

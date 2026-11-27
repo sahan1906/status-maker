@@ -18,7 +18,6 @@ export interface PublicAppConfig {
   shorts_ad_enabled: boolean;
   shorts_ad_every_n: number;
   shorts_download_ad_enabled: boolean;
-  shorts_api_base_url: string;
   telegram_bot_username: string;
   telegram_miniapp_short_name: string;
 }
@@ -39,9 +38,8 @@ export const DEFAULT_APP_CONFIG: PublicAppConfig = {
   cleanads_interstitial_placement_id: '',
   cleanads_test_mode: false,
   shorts_ad_enabled: true,
-  shorts_ad_every_n: 5,
-  shorts_download_ad_enabled: true,
-  shorts_api_base_url: 'https://pulse-shorts.pages.dev',
+  shorts_ad_every_n: 1,
+  shorts_download_ad_enabled: false,
   telegram_bot_username: '',
   telegram_miniapp_short_name: '',
 };

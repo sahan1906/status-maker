@@ -20,23 +20,16 @@ const BOOLEAN_SETTING_KEYS = new Set([
 ]);
 
 function clampShortsEveryN(raw: unknown): number {
-  const n = Number.parseInt(String(raw ?? '5'), 10);
-  if (!Number.isFinite(n)) return 5;
-  return Math.max(3, Math.min(10, n));
+  const n = Number.parseInt(String(raw ?? '1'), 10);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(10, n));
 }
 
-function normalizeShortsBaseUrl(raw: unknown): string {
-  const trimmed = String(raw || '').trim().replace(/\/+$/, '');
-  if (!trimmed) return 'https://pulse-shorts.pages.dev';
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol === 'https:') {
-      return parsed.origin;
-    }
-  } catch {
-    // Fallback to default
-  }
-  return 'https://pulse-shorts.pages.dev';
+function sanitizeChannelId(raw: unknown): string {
+  return String(raw || '')
+    .trim()
+    .replace(/[^0-9-]/g, '')
+    .slice(0, 32);
 }
 
 function sanitizeTelegramSlug(raw: unknown): string {
@@ -107,7 +100,7 @@ export const onRequestGet: PagesHandler = async ({ request, env }) => {
     shorts_ad_enabled: (map.shorts_ad_enabled ?? 'true') === 'true',
     shorts_ad_every_n: clampShortsEveryN(map.shorts_ad_every_n),
     shorts_download_ad_enabled: (map.shorts_download_ad_enabled ?? 'true') === 'true',
-    shorts_api_base_url: normalizeShortsBaseUrl(map.shorts_api_base_url),
+    shorts_channel_id: sanitizeChannelId(map.shorts_channel_id || ''),
     telegram_bot_username: botUsername,
     telegram_miniapp_short_name: sanitizeTelegramSlug(map.telegram_miniapp_short_name || ''),
     bot_token_configured: Boolean(effectiveToken),
@@ -161,8 +154,8 @@ export const onRequestPost: PagesHandler = async ({ request, env }) => {
       continue;
     }
 
-    if (key === 'shorts_api_base_url') {
-      await setSetting(env.DB, key, normalizeShortsBaseUrl(raw));
+    if (key === 'shorts_channel_id') {
+      await setSetting(env.DB, key, sanitizeChannelId(raw));
       continue;
     }
 

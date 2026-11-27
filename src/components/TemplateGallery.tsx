@@ -23,6 +23,7 @@ interface TemplateGalleryProps {
   watermarkText: string;
   onCategoryChange: (cat: TemplateCategory) => void;
   onSelectTemplate: (template: ReelTemplate, goNext?: boolean) => void;
+  onPreviewInEdits: (template: ReelTemplate) => void;
 }
 
 const sampleImageCache = new Map<string, Promise<FrameImage>>();
@@ -196,7 +197,7 @@ function MiniPreviewCard({
               : 'bg-white/[0.06] text-zinc-100 border border-white/10 hover:bg-white/[0.12]'
           }`}
         >
-          <span>{isSelected ? 'Open Editor' : 'Use Edit'}</span>
+          <span>View Edit</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
@@ -212,6 +213,7 @@ export function TemplateGallery({
   watermarkText,
   onCategoryChange,
   onSelectTemplate,
+  onPreviewInEdits,
 }: TemplateGalleryProps) {
   const allTemplates = useMemo(
     () => [...customTemplates, ...REEL_TEMPLATES],
@@ -308,8 +310,8 @@ export function TemplateGallery({
             isSelected={tpl.id === selectedTemplate.id}
             watermarkEnabled={watermarkEnabled}
             watermarkText={watermarkText}
-            onSelect={() => onSelectTemplate(tpl, false)}
-            onUse={() => onSelectTemplate(tpl, true)}
+            onSelect={() => onPreviewInEdits(tpl)}
+            onUse={() => onPreviewInEdits(tpl)}
           />
         ))}
       </div>

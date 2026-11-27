@@ -23,7 +23,7 @@ import {
   extractCleanAdsPlacementId,
   testCleanAdsPlacement,
 } from '../lib/adNetworks';
-import { buildShortsTelegramDirectLink } from '../lib/telegram';
+import { buildEditsTelegramDirectLink } from '../lib/telegram';
 
 interface AdminStats {
   totalUsers: number;
@@ -49,7 +49,7 @@ interface AdminSettings {
   shorts_ad_enabled: boolean;
   shorts_ad_every_n: number;
   shorts_download_ad_enabled: boolean;
-  shorts_api_base_url: string;
+  shorts_channel_id: string;
   telegram_bot_username: string;
   telegram_miniapp_short_name: string;
   bot_token_configured: boolean;
@@ -61,7 +61,17 @@ interface AdminConsoleProps {
   onConfigUpdated: () => void;
 }
 
-type AdminTab = 'dashboard' | 'overlays' | 'settings' | 'broadcast';
+type AdminTab = 'dashboard' | 'shorts' | 'overlays' | 'settings' | 'broadcast';
+
+interface AdminShortItem {
+  id: string;
+  title: string;
+  tags: string;
+  video_url: string;
+  poster_url: string;
+  likes: number;
+  created_at: string;
+}
 
 interface AdminOverlayItem {
   id: string;
@@ -92,9 +102,9 @@ const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
   cleanads_interstitial_placement_id: '',
   cleanads_test_mode: false,
   shorts_ad_enabled: true,
-  shorts_ad_every_n: 5,
-  shorts_download_ad_enabled: true,
-  shorts_api_base_url: 'https://pulse-shorts.pages.dev',
+  shorts_ad_every_n: 1,
+  shorts_download_ad_enabled: false,
+  shorts_channel_id: '',
   telegram_bot_username: '',
   telegram_miniapp_short_name: '',
   bot_token_configured: false,
@@ -125,6 +135,7 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
   const [webhookLoading, setWebhookLoading] = useState(false);
   const [webhookMsg, setWebhookMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [copiedDirectLink, setCopiedDirectLink] = useState(false);
+  const [copiedWebLink, setCopiedWebLink] = useState(false);
   const [testingCleanAds, setTestingCleanAds] = useState<'rewarded' | 'interstitial' | null>(null);
   const [cleanAdsTestMsg, setCleanAdsTestMsg] = useState<{ ok: boolean; text: string } | null>(
     null
@@ -156,6 +167,15 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
   const [ovSubmitting, setOvSubmitting] = useState(false);
   const [ovMsg, setOvMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const ovFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Self-hosted Shorts (Private Telegram Channel -> D1)
+  const [adminShorts, setAdminShorts] = useState<AdminShortItem[]>([]);
+  const [shortTitle, setShortTitle] = useState('');
+  const [shortTags, setShortTags] = useState('');
+  const [shortFile, setShortFile] = useState<File | null>(null);
+  const [shortUploading, setShortUploading] = useState(false);
+  const [shortMsg, setShortMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const shortFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,10 +209,11 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
     async (bearer: string) => {
       setStatsLoading(true);
       try {
-        const [statsRes, settingsRes, overlaysRes] = await Promise.all([
+        const [statsRes, settingsRes, overlaysRes, shortsRes] = await Promise.all([
           fetch('/api/admin/stats', { headers: { Authorization: `Bearer ${bearer}` } }),
           fetch('/api/admin/settings', { headers: { Authorization: `Bearer ${bearer}` } }),
           fetch('/api/admin/overlays', { headers: { Authorization: `Bearer ${bearer}` } }),
+          fetch('/api/admin/shorts', { headers: { Authorization: `Bearer ${bearer}` } }),
         ]);
 
         if (statsRes.status === 401 || settingsRes.status === 401) {
@@ -218,6 +239,10 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
           if (ovData.storage_chat_id) {
             setOvStorageChatId(ovData.storage_chat_id);
           }
+        }
+        if (shortsRes.ok) {
+          const shData = (await shortsRes.json()) as { videos?: AdminShortItem[] };
+          setAdminShorts(Array.isArray(shData.videos) ? shData.videos : []);
         }
       } finally {
         setStatsLoading(false);
@@ -302,9 +327,9 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
         ),
         cleanads_test_mode: settings.cleanads_test_mode,
         shorts_ad_enabled: settings.shorts_ad_enabled,
-        shorts_ad_every_n: Math.max(3, Math.min(10, Number(settings.shorts_ad_every_n) || 5)),
-        shorts_download_ad_enabled: settings.shorts_download_ad_enabled,
-        shorts_api_base_url: settings.shorts_api_base_url.trim() || 'https://pulse-shorts.pages.dev',
+        shorts_ad_every_n: 1,
+        shorts_download_ad_enabled: false,
+        shorts_channel_id: settings.shorts_channel_id.trim(),
         telegram_bot_username: settings.telegram_bot_username.replace(/^@+/, '').trim(),
         telegram_miniapp_short_name: settings.telegram_miniapp_short_name.trim(),
       };
@@ -529,6 +554,61 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
     }
   };
 
+  const handleUploadShort = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token || !shortFile) {
+      setShortMsg({ ok: false, text: 'Choose an MP4 video file first.' });
+      return;
+    }
+    setShortUploading(true);
+    setShortMsg(null);
+    try {
+      const form = new FormData();
+      form.append('title', shortTitle.trim() || 'Short Reel');
+      form.append('tags', shortTags.trim());
+      if (settings.shorts_channel_id.trim()) {
+        form.append('shorts_channel_id', settings.shorts_channel_id.trim());
+      }
+      form.append('video', shortFile, shortFile.name || 'short.mp4');
+
+      const res = await fetch('/api/admin/shorts', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        setShortMsg({ ok: false, text: data.error || 'Could not upload short video.' });
+        return;
+      }
+      setShortTitle('');
+      setShortTags('');
+      setShortFile(null);
+      if (shortFileInputRef.current) shortFileInputRef.current.value = '';
+      setShortMsg({ ok: true, text: 'Video uploaded to your private channel & published to Edits!' });
+      await loadDashboardData(token);
+    } catch {
+      setShortMsg({ ok: false, text: 'Network error while uploading video.' });
+    } finally {
+      setShortUploading(false);
+    }
+  };
+
+  const handleDeleteShort = async (id: string) => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/admin/shorts?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setAdminShorts((prev) => prev.filter((item) => item.id !== id));
+      }
+    } catch {
+      // Ignore network error
+    }
+  };
+
   if (authStatusLoading) {
     return (
       <div className="min-h-screen bg-[#08080A] text-zinc-100 flex items-center justify-center p-6">
@@ -641,6 +721,15 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
               }`}
             >
               Dashboard
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('shorts')}
+              className={`min-h-[34px] px-3 py-1 text-xs font-semibold rounded-lg whitespace-nowrap transition ${
+                activeTab === 'shorts' ? 'bg-white text-[#08080A]' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Edits ({adminShorts.length})
             </button>
             <button
               type="button"
@@ -1108,39 +1197,39 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                 )}
               </div>
 
-              {/* Hidden /shorts Feed Monetization & Telegram Direct Link */}
+              {/* In-App Edits Feed, Private Channel & Telegram Direct Link */}
               <div className="md:col-span-2 rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h2 className="text-sm font-semibold text-white">
-                      Shorts Feed (<code className="font-mono text-amber-300">/shorts</code>) &amp; Telegram Direct Link
+                      Edits Feed, Private Channel &amp; Telegram Direct Link
                     </h2>
                     <p className="text-xs text-zinc-400 mt-0.5">
-                      Streams live from Pulse Shorts with zero re-uploading. Hidden from the main editor navigation until you choose its placement.
+                      Edits automatically includes all built-in Templates (with Use this Edit button) plus any videos you post to your private Telegram channel.
                     </p>
                   </div>
 
                   <a
-                    href="/shorts"
+                    href="/edits"
                     target="_blank"
                     rel="noreferrer"
                     className="min-h-[38px] px-3.5 text-xs font-semibold rounded-xl bg-white/[0.08] border border-white/15 text-white hover:bg-white/[0.14] inline-flex items-center gap-1.5 transition whitespace-nowrap"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Preview /shorts</span>
+                    <span>Open Edits Tab</span>
                   </a>
                 </div>
 
                 <div className="grid md:grid-cols-2 gap-4">
-                  {/* Swipe Ad Gate & Download Ad Controls */}
+                  {/* Hourly 1-Scroll Ad Gate */}
                   <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-4">
                     <label className="flex items-center justify-between gap-3 cursor-pointer">
                       <div>
                         <span className="text-xs font-semibold text-white block">
-                          Swipe Ad Gate on /shorts
+                          Hourly Ad Gate in Edits Tab
                         </span>
-                        <span className="text-[11px] text-zinc-400">
-                          Prompt 1 ad after every {settings.shorts_ad_every_n} swipes to continue watching
+                        <span className="text-[11px] text-zinc-400 leading-relaxed block mt-0.5">
+                          Shows 1 short ad after the user&apos;s first scroll in Edits — strictly capped to once per hour per user.
                         </span>
                       </div>
                       <input
@@ -1153,157 +1242,319 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                       />
                     </label>
 
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-zinc-400">Swipes Before Ad (3–10)</span>
-                        <span className="font-mono tabular-nums font-semibold text-amber-300">
-                          Every {settings.shorts_ad_every_n} swipes
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={3}
-                        max={10}
-                        step={1}
-                        value={settings.shorts_ad_every_n}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            shorts_ad_every_n: Math.max(3, Math.min(10, Number(e.target.value) || 5)),
-                          }))
-                        }
-                        className="w-full accent-amber-400 cursor-pointer"
-                      />
-                      <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                        <span>3</span>
-                        <span>5 (Default)</span>
-                        <span>7</span>
-                        <span>10</span>
-                      </div>
+                    <div className="pt-3 border-t border-white/10 space-y-1">
+                      <span className="text-xs font-semibold text-zinc-200 block">
+                        Editor Download Ad
+                      </span>
+                      <p className="text-[11px] text-zinc-400 leading-relaxed">
+                        Exporting / downloading a finished video in the Editor continues to show your rewarded ad every time (controlled by Rewarded Ad Networks above).
+                      </p>
                     </div>
-
-                    <label className="flex items-center justify-between gap-3 pt-2 border-t border-white/10 cursor-pointer">
-                      <div>
-                        <span className="text-xs font-semibold text-white block">
-                          Rewarded Ad for Save / Download
-                        </span>
-                        <span className="text-[11px] text-zinc-400">
-                          Require 1 rewarded ad before saving a Short MP4
-                        </span>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={settings.shorts_download_ad_enabled}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            shorts_download_ad_enabled: e.target.checked,
-                          }))
-                        }
-                        className="h-5 w-5 accent-amber-400 rounded shrink-0"
-                      />
-                    </label>
                   </div>
 
-                  {/* Upstream API & Telegram Mini App Direct Link */}
-                  <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-3.5">
-                    <label className="block space-y-1.5">
-                      <span className="text-xs text-zinc-400">Pulse Shorts API Base URL</span>
-                      <input
-                        type="url"
-                        value={settings.shorts_api_base_url}
-                        onChange={(e) =>
-                          setSettings((s) => ({ ...s, shorts_api_base_url: e.target.value }))
-                        }
-                        placeholder="https://pulse-shorts.pages.dev"
-                        className="w-full min-h-[42px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
-                      />
-                    </label>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <label className="block space-y-1.5">
-                        <span className="text-xs text-zinc-400">Telegram Bot Username</span>
+                  {/* Private Telegram Channel & Direct Links */}
+                  <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-4">
+                    {/* 1. Private Telegram Channel ID for Auto-Sync */}
+                    <div className="space-y-1.5">
+                      <label className="block space-y-1">
+                        <span className="text-xs font-semibold text-white block">
+                          Private Edits Channel ID (Auto-Sync)
+                        </span>
+                        <span className="text-[11px] text-zinc-400 block leading-relaxed">
+                          Add your bot as Admin in your private channel, click Register Webhook above, then post{' '}
+                          <code className="font-mono text-amber-300">/setshortschannel</code> once in the channel (or paste the <code className="font-mono text-zinc-300">-100...</code> ID below). Every AI prompt / showcase video you post there appears in Edits automatically.
+                        </span>
                         <input
                           type="text"
-                          value={settings.telegram_bot_username}
+                          value={settings.shorts_channel_id}
                           onChange={(e) =>
                             setSettings((s) => ({
                               ...s,
-                              telegram_bot_username: e.target.value.replace(/^@+/, ''),
+                              shorts_channel_id: e.target.value.replace(/[^0-9-]/g, ''),
                             }))
                           }
-                          placeholder="YourReelCraftBot"
-                          className="w-full min-h-[42px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
-                        />
-                      </label>
-
-                      <label className="block space-y-1.5">
-                        <span className="text-xs text-zinc-400">Mini App Short Name</span>
-                        <input
-                          type="text"
-                          value={settings.telegram_miniapp_short_name}
-                          onChange={(e) =>
-                            setSettings((s) => ({
-                              ...s,
-                              telegram_miniapp_short_name: e.target.value,
-                            }))
-                          }
-                          placeholder="Optional (e.g. app)"
-                          className="w-full min-h-[42px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                          placeholder="-1001234567890"
+                          className="w-full min-h-[40px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
                         />
                       </label>
                     </div>
 
-                    {/* Ready-to-copy Telegram Mini App Direct Link */}
-                    <div className="pt-2 border-t border-white/10 space-y-1.5">
-                      <span className="text-[11px] font-medium text-zinc-400 block">
-                        Telegram Mini App Direct Link (Opens inside Telegram, not browser)
-                      </span>
+                    {/* 2. Telegram Mini App Direct Link */}
+                    <div className="pt-3 border-t border-white/10 space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="block space-y-1">
+                          <span className="text-[11px] text-zinc-400">Reel Maker Bot Username</span>
+                          <input
+                            type="text"
+                            value={settings.telegram_bot_username}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                telegram_bot_username: e.target.value.replace(/^@+/, ''),
+                              }))
+                            }
+                            placeholder="YourReelMakerBot"
+                            className="w-full min-h-[40px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                          />
+                        </label>
+
+                        <label className="block space-y-1">
+                          <span className="text-[11px] text-zinc-400">Mini App Short Name</span>
+                          <input
+                            type="text"
+                            value={settings.telegram_miniapp_short_name}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                telegram_miniapp_short_name: e.target.value,
+                              }))
+                            }
+                            placeholder="Optional (e.g. app)"
+                            className="w-full min-h-[40px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                          />
+                        </label>
+                      </div>
+
                       {(() => {
-                        const directLink = buildShortsTelegramDirectLink(
-                          settings.telegram_bot_username,
-                          settings.telegram_miniapp_short_name
-                        );
+                        const hasBot = Boolean(settings.telegram_bot_username.trim());
+                        const directLink = hasBot
+                          ? buildEditsTelegramDirectLink(
+                              settings.telegram_bot_username,
+                              settings.telegram_miniapp_short_name
+                            )
+                          : 'https://t.me/YOUR_BOT_USERNAME?startapp=edits';
                         return (
-                          <div className="flex items-center gap-2">
-                            <code className="flex-1 min-w-0 truncate px-3 py-2.5 text-[11px] font-mono rounded-xl bg-[#111114] border border-white/10 text-amber-300">
-                              {directLink}
-                            </code>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard?.writeText(directLink).catch(() => {});
-                                setCopiedDirectLink(true);
-                                window.setTimeout(() => setCopiedDirectLink(false), 2000);
-                              }}
-                              className="min-h-[40px] px-3 text-xs font-semibold rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 flex items-center gap-1.5 shrink-0 transition"
-                            >
-                              {copiedDirectLink ? (
-                                <>
-                                  <CheckCircle2 className="w-3.5 h-3.5" />
-                                  <span>Copied</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="w-3.5 h-3.5" />
-                                  <span>Copy</span>
-                                </>
-                              )}
-                            </button>
+                          <div className="space-y-1.5">
+                            <span className="text-[11px] text-zinc-400 block">
+                              Telegram Direct Link to Edits Tab
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <code
+                                className={`flex-1 min-w-0 truncate px-3 py-2.5 text-[11px] font-mono rounded-xl bg-[#111114] border border-white/10 ${
+                                  hasBot ? 'text-amber-300' : 'text-zinc-500'
+                                }`}
+                              >
+                                {directLink}
+                              </code>
+                              <button
+                                type="button"
+                                disabled={!hasBot}
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(directLink).catch(() => {});
+                                  setCopiedDirectLink(true);
+                                  window.setTimeout(() => setCopiedDirectLink(false), 2000);
+                                }}
+                                className="min-h-[40px] px-3 text-xs font-semibold rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 disabled:opacity-40 flex items-center gap-1.5 shrink-0 transition"
+                              >
+                                {copiedDirectLink ? (
+                                  <>
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>Copied</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5" />
+                                    <span>Copy</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
                           </div>
                         );
                       })()}
-                      {!settings.telegram_bot_username && (
-                        <p className="text-[11px] text-zinc-500">
-                          Enter your Bot Username (or save your Bot Token) to generate a <code className="font-mono text-zinc-400">https://t.me/...</code> Mini App link.
-                        </p>
-                      )}
+
+                      {(() => {
+                        const webEditsUrl =
+                          typeof window !== 'undefined'
+                            ? `${window.location.origin}/edits`
+                            : '/edits';
+                        return (
+                          <div className="space-y-1">
+                            <span className="text-[11px] text-zinc-500 block">
+                              Web URL (Browser Preview)
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <code className="flex-1 min-w-0 truncate px-3 py-2 text-[11px] font-mono rounded-xl bg-[#111114] border border-white/10 text-zinc-300">
+                                {webEditsUrl}
+                              </code>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(webEditsUrl).catch(() => {});
+                                  setCopiedWebLink(true);
+                                  window.setTimeout(() => setCopiedWebLink(false), 2000);
+                                }}
+                                className="min-h-[36px] px-3 text-xs font-semibold rounded-xl bg-white/[0.08] border border-white/15 text-white hover:bg-white/[0.14] flex items-center gap-1.5 shrink-0 transition"
+                              >
+                                {copiedWebLink ? (
+                                  <>
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                    <span>Copied</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5" />
+                                    <span>Copy</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 </div>
               </div>
             </div>
           </form>
+        )}
+
+        {/* Edits Videos Management Tab (Private Channel Auto-Sync + Direct Upload) */}
+        {activeTab === 'shorts' && (
+          <section className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 className="text-2xl font-bold text-white">Edits Videos (AI Prompts &amp; Custom)</h1>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Built-in Templates appear in Edits automatically with a Use this Edit button. Post AI prompt videos in your private Telegram channel (or upload below) to mix them into Edits.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => token && loadDashboardData(token)}
+                className="min-h-[40px] px-3.5 text-xs font-semibold rounded-xl bg-white/[0.08] border border-white/15 text-white hover:bg-white/[0.14] flex items-center gap-1.5"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <div className="grid lg:grid-cols-12 gap-6 items-start">
+              {/* Direct Upload to Private Channel */}
+              <form
+                onSubmit={handleUploadShort}
+                className="lg:col-span-5 rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-4"
+              >
+                <div>
+                  <h2 className="text-sm font-semibold text-white">Upload Video to Edits Feed</h2>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    {settings.shorts_channel_id
+                      ? `Linked Channel: ${settings.shorts_channel_id}`
+                      : 'Link your private channel in Settings (or post /setshortschannel in the channel) first.'}
+                  </p>
+                </div>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-zinc-400">Title / Caption</span>
+                  <input
+                    type="text"
+                    value={shortTitle}
+                    onChange={(e) => setShortTitle(e.target.value)}
+                    placeholder="e.g. Cinematic AI Portrait Prompt"
+                    className="w-full min-h-[42px] px-3 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                  />
+                </label>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-zinc-400">Tags (comma or space separated)</span>
+                  <input
+                    type="text"
+                    value={shortTags}
+                    onChange={(e) => setShortTags(e.target.value)}
+                    placeholder="ai, prompt, portrait"
+                    className="w-full min-h-[42px] px-3 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                  />
+                </label>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-zinc-400">Vertical Video MP4 (max 19.5 MB)</span>
+                  <input
+                    ref={shortFileInputRef}
+                    type="file"
+                    accept="video/mp4,video/*"
+                    onChange={(e) => setShortFile(e.target.files?.[0] || null)}
+                    className="w-full text-xs text-zinc-300 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-white/10 file:text-white hover:file:bg-white/20"
+                  />
+                </label>
+
+                {shortMsg && (
+                  <p
+                    className={`text-xs px-3 py-2 rounded-xl border ${
+                      shortMsg.ok
+                        ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/25 text-red-200'
+                    }`}
+                  >
+                    {shortMsg.text}
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={shortUploading || !shortFile}
+                  className="w-full min-h-[44px] px-4 text-xs font-semibold rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 disabled:opacity-50 flex items-center justify-center gap-2 transition"
+                >
+                  {shortUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                  <span>{shortUploading ? 'Uploading...' : 'Upload & Publish to Edits'}</span>
+                </button>
+              </form>
+
+              {/* Published Custom Videos List */}
+              <div className="lg:col-span-7 rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-white">
+                    Published Channel Videos ({adminShorts.length})
+                  </h2>
+                </div>
+
+                {adminShorts.length === 0 ? (
+                  <div className="py-12 text-center space-y-2 border border-dashed border-white/10 rounded-xl px-4">
+                    <Film className="w-7 h-7 text-zinc-500 mx-auto" />
+                    <p className="text-sm font-medium text-zinc-300">No custom videos uploaded yet</p>
+                    <p className="text-xs text-zinc-500 max-w-sm mx-auto">
+                      Your built-in Templates are already live in Edits. Post AI prompt videos in your linked private channel (or upload on the left) to mix them in.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-white/10">
+                    {adminShorts.map((item) => (
+                      <div key={item.id} className="py-3 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-10 h-14 rounded-lg bg-[#08080A] border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
+                            {item.poster_url ? (
+                              <img
+                                src={item.poster_url}
+                                alt={item.title}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <Film className="w-4 h-4 text-zinc-600" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-white truncate">{item.title}</p>
+                            <p className="text-xs text-zinc-400 font-mono tabular-nums truncate">
+                              {item.likes} likes{item.tags ? ` · ${item.tags}` : ''}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteShort(item.id)}
+                          aria-label={`Delete ${item.title}`}
+                          className="min-w-[40px] min-h-[40px] rounded-xl text-zinc-400 hover:text-red-300 hover:bg-red-500/10 flex items-center justify-center shrink-0 transition"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
         )}
 
         {/* Batched Broadcast Tab */}

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Download, Images, LayoutGrid } from 'lucide-react';
+import { ArrowLeft, Clapperboard, Download, Images, LayoutGrid } from 'lucide-react';
 import { AdminConsole } from './components/AdminConsole';
 import { DownloadVideoModal } from './components/DownloadVideoModal';
+import { EditsFeedView } from './components/EditsFeedView';
 import { GalleryPhoto, PhotoTextEditor } from './components/PhotoTextEditor';
-import { ShortsFeedView } from './components/ShortsFeedView';
 import { TemplateGallery } from './components/TemplateGallery';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import {
@@ -26,7 +26,7 @@ import {
   shouldTriggerRewardAd,
 } from './lib/adNetworks';
 import {
-  getInitialShortsRouteState,
+  getInitialEditsRouteState,
   haptic,
   initTelegramApp,
   TelegramContextInfo,
@@ -45,7 +45,7 @@ import {
   RenderClip,
 } from './lib/videoRenderer';
 
-type StudioView = 'templates' | 'edit';
+type StudioView = 'templates' | 'edit' | 'edits';
 
 interface DecodedEntry {
   source: FrameSource;
@@ -63,12 +63,15 @@ function makeSampleGallery(template: ReelTemplate): GalleryPhoto[] {
 }
 
 export default function App() {
-  // Hidden /admin and /shorts (or Telegram ?startapp=shorts) routes — never linked in main UI
+  // Hidden /admin route (never linked anywhere in user-facing UI)
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() =>
     typeof window !== 'undefined' && window.location.pathname.replace(/\/+$/, '') === '/admin'
   );
-  const [shortsRoute, setShortsRoute] = useState<{ isShorts: boolean; initialVideoId: string }>(
-    () => getInitialShortsRouteState()
+  const [initialEditVideoId, setInitialEditVideoId] = useState<string>(
+    () => getInitialEditsRouteState().initialVideoId
+  );
+  const [initialEditTemplateId, setInitialEditTemplateId] = useState<string>(
+    () => getInitialEditsRouteState().initialTemplateId
   );
 
   const [appConfig, setAppConfig] = useState<PublicAppConfig>(DEFAULT_APP_CONFIG);
@@ -80,8 +83,10 @@ export default function App() {
     startParam: '',
   });
 
-  // Clean 2-view workflow: Templates & Media Editor (starts Blank by default)
-  const [view, setView] = useState<StudioView>('templates');
+  // Clean 3-tab workflow: Templates, Edits, and Editor
+  const [view, setView] = useState<StudioView>(() =>
+    getInitialEditsRouteState().isEdits ? 'edits' : 'templates'
+  );
   const [activeCategory, setActiveCategory] = useState<TemplateCategory>('all');
   const [selectedTemplate, setSelectedTemplate] = useState<ReelTemplate>(BLANK_TEMPLATE);
 
@@ -189,16 +194,35 @@ export default function App() {
   useEffect(() => {
     const tgInfo = initTelegramApp();
     setTgContext(tgInfo);
-    if (tgInfo.startParam === 'shorts') {
-      setShortsRoute({ isShorts: true, initialVideoId: '' });
+    if (tgInfo.startParam === 'edits' || tgInfo.startParam === 'shorts') {
+      setInitialEditVideoId('');
+      setInitialEditTemplateId('');
+      setView('edits');
+    } else if (tgInfo.startParam.startsWith('edit_') && tgInfo.startParam.length > 5) {
+      setInitialEditVideoId(tgInfo.startParam.slice(5).trim());
+      setInitialEditTemplateId('');
+      setView('edits');
     } else if (tgInfo.startParam.startsWith('short_') && tgInfo.startParam.length > 6) {
-      setShortsRoute({ isShorts: true, initialVideoId: tgInfo.startParam.slice(6).trim() });
+      setInitialEditVideoId(tgInfo.startParam.slice(6).trim());
+      setInitialEditTemplateId('');
+      setView('edits');
+    } else if (tgInfo.startParam.startsWith('tpl_') && tgInfo.startParam.length > 4) {
+      setInitialEditVideoId('');
+      setInitialEditTemplateId(tgInfo.startParam.slice(4).trim());
+      setView('edits');
     }
     refreshConfig();
 
     const onPop = () => {
       setIsAdminRoute(window.location.pathname.replace(/\/+$/, '') === '/admin');
-      setShortsRoute(getInitialShortsRouteState());
+      const nextEdits = getInitialEditsRouteState();
+      if (nextEdits.isEdits) {
+        setInitialEditVideoId(nextEdits.initialVideoId);
+        setInitialEditTemplateId(nextEdits.initialTemplateId);
+        setView('edits');
+      } else {
+        setView((prev) => (prev === 'edits' ? 'templates' : prev));
+      }
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -415,6 +439,14 @@ export default function App() {
         void triggerInterstitialWithCooldown();
       }
     }
+  };
+
+  const handlePreviewTemplateInEdits = (tpl: ReelTemplate) => {
+    haptic('light');
+    setSelectedTemplate(tpl);
+    setInitialEditVideoId('');
+    setInitialEditTemplateId(tpl.id);
+    setView('edits');
   };
 
   const handleAddPhotos = (files: FileList) => {
@@ -1038,32 +1070,21 @@ export default function App() {
     );
   }
 
-  if (shortsRoute.isShorts) {
-    return (
-      <ShortsFeedView
-        appConfig={appConfig}
-        tgContext={tgContext}
-        initialVideoId={shortsRoute.initialVideoId}
-        onOpenStudio={() => {
-          window.history.pushState({}, '', '/');
-          setShortsRoute({ isShorts: false, initialVideoId: '' });
-          setView('templates');
-        }}
-      />
-    );
-  }
-
   const activeAdLabel = getActiveRewardAdLabel(appConfig);
   const isAnyAdOpen = isRunningAd || isRunningInterstitial;
 
   return (
     <div
       className={`bg-[#08080A] text-zinc-100 flex flex-col ${
-        view === 'edit' ? 'h-[100dvh] overflow-hidden' : 'min-h-screen'
+        view === 'edit' || view === 'edits' ? 'h-[100dvh] overflow-hidden' : 'min-h-screen'
       }`}
     >
-      {/* Top Bar: Clean 3-zone header — Templates & Photos Edit + Download Video */}
-      <header className="border-b border-white/10 bg-[#08080A]/95 backdrop-blur-md shrink-0 z-30">
+      {/* Top Bar: Clean 3-zone header — Templates, Edits & Editor + Download Video */}
+      <header
+        className={`border-b border-white/10 bg-[#08080A]/95 backdrop-blur-md shrink-0 z-30 ${
+          view === 'edits' ? 'hidden md:block' : ''
+        }`}
+      >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-6">
           {/* Zone 1: Brand or mobile Back-to-Templates */}
           <div className="flex items-center gap-2 shrink-0">
@@ -1105,7 +1126,7 @@ export default function App() {
             )}
           </div>
 
-          {/* Zone 2: Clean 2-section Navigation (Templates | Edit Photos) */}
+          {/* Zone 2: Clean 3-section Navigation (Templates | Edits | Editor) */}
           <nav
             aria-label="Workspace sections"
             className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-400"
@@ -1123,6 +1144,21 @@ export default function App() {
             </button>
             <button
               type="button"
+              onClick={() => {
+                setInitialEditVideoId('');
+                setInitialEditTemplateId('');
+                setView('edits');
+              }}
+              className={`py-1 whitespace-nowrap shrink-0 transition-colors ${
+                view === 'edits'
+                  ? 'text-white underline decoration-amber-400 decoration-2 underline-offset-8'
+                  : 'hover:text-white'
+              }`}
+            >
+              Edits
+            </button>
+            <button
+              type="button"
               onClick={() => setView('edit')}
               className={`py-1 whitespace-nowrap shrink-0 transition-colors ${
                 view === 'edit'
@@ -1134,7 +1170,7 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Zone 3: Download Video (Photos Edit only — never shown on Templates tab) */}
+          {/* Zone 3: Download Video (Editor only — never shown on Templates/Edits) */}
           <div className="shrink-0">
             {view === 'edit' ? (
               <button
@@ -1168,6 +1204,7 @@ export default function App() {
                   setActiveCategory(cat);
                 }}
                 onSelectTemplate={handleSelectTemplate}
+                onPreviewInEdits={handlePreviewTemplateInEdits}
               />
             </div>
 
@@ -1307,23 +1344,59 @@ export default function App() {
         </main>
       )}
 
-      {/* Mobile Bottom Navigation (shown on Templates view; hidden on Edit view so the Edit Tool Dock owns the thumb zone) */}
-      {view === 'templates' && (
+      {/* VIEW 3: IN-APP EDITS VERTICAL FEED (Templates + Private-Channel AI Prompt Videos) */}
+      {view === 'edits' && (
+        <EditsFeedView
+          embedded
+          appConfig={appConfig}
+          tgContext={tgContext}
+          customTemplates={customTemplates}
+          watermarkEnabled={appConfig.watermark_enabled}
+          watermarkText={appConfig.watermark_text}
+          initialVideoId={initialEditVideoId}
+          initialTemplateId={initialEditTemplateId}
+          onUseTemplate={(tpl) => handleSelectTemplate(tpl, true)}
+          onOpenStudio={() => {
+            setView('templates');
+          }}
+        />
+      )}
+
+      {/* Mobile Bottom Navigation (Templates | Edits | Editor; hidden on Edit view so the Edit Tool Dock owns the thumb zone) */}
+      {(view === 'templates' || view === 'edits') && (
         <nav
           aria-label="Mobile navigation"
           className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#08080A]/95 backdrop-blur-md border-t border-white/10 pb-safe"
         >
-          <div className="grid grid-cols-2 h-14">
+          <div className="grid grid-cols-3 h-14">
             <button
               type="button"
               onClick={() => {
                 haptic('light');
                 setView('templates');
               }}
-              className="flex flex-col items-center justify-center gap-0.5 text-white transition-colors"
+              className={`flex flex-col items-center justify-center gap-0.5 transition-colors ${
+                view === 'templates' ? 'text-white' : 'text-zinc-400 hover:text-white'
+              }`}
             >
               <LayoutGrid className="w-5 h-5" />
               <span className="text-[11px] font-semibold">Templates</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                haptic('light');
+                setInitialEditVideoId('');
+                setInitialEditTemplateId('');
+                setView('edits');
+              }}
+              className={`flex flex-col items-center justify-center gap-0.5 transition-colors ${
+                view === 'edits' ? 'text-amber-400' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Clapperboard className="w-5 h-5" />
+              <span className="text-[11px] font-semibold">Edits</span>
             </button>
 
             <button

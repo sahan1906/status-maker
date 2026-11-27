@@ -25,7 +25,10 @@ export const onRequestPost: PagesHandler = async ({ request, env }) => {
   }
 
   const webhookUrl = `${origin}/api/telegram/webhook`;
-  const payload: Record<string, string> = { url: webhookUrl };
+  const payload: Record<string, unknown> = {
+    url: webhookUrl,
+    allowed_updates: ['message', 'channel_post', 'edited_channel_post'],
+  };
   const secretToken = (env.TELEGRAM_WEBHOOK_SECRET || '').trim();
   if (secretToken) {
     payload.secret_token = secretToken;

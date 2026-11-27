@@ -36,14 +36,12 @@ const settingsMap = new Map<string, string>([
   ['cleanads_interstitial_placement_id', ''],
   ['cleanads_test_mode', 'false'],
   ['shorts_ad_enabled', 'true'],
-  ['shorts_ad_every_n', '5'],
-  ['shorts_download_ad_enabled', 'true'],
-  ['shorts_api_base_url', 'https://pulse-shorts.pages.dev'],
+  ['shorts_ad_every_n', '1'],
+  ['shorts_download_ad_enabled', 'false'],
+  ['shorts_channel_id', ''],
   ['telegram_bot_username', ''],
   ['telegram_miniapp_short_name', ''],
 ]);
-
-const shortsLikesMap = new Map<string, number>();
 
 const RUNTIME_SESSION_SECRET =
   (process.env.SESSION_SECRET || '').trim() ||
@@ -67,7 +65,6 @@ const PUBLIC_KEYS = [
   'shorts_ad_enabled',
   'shorts_ad_every_n',
   'shorts_download_ad_enabled',
-  'shorts_api_base_url',
   'telegram_bot_username',
   'telegram_miniapp_short_name',
 ] as const;
@@ -171,8 +168,8 @@ async function startServer() {
       if (BOOLEAN_KEYS.has(key)) {
         out[key] = val === 'true';
       } else if (key === 'shorts_ad_every_n') {
-        const parsed = Number.parseInt(val || '5', 10);
-        out[key] = Number.isFinite(parsed) ? Math.max(3, Math.min(10, parsed)) : 5;
+        const parsed = Number.parseInt(val || '1', 10);
+        out[key] = Number.isFinite(parsed) ? Math.max(1, Math.min(10, parsed)) : 1;
       } else {
         out[key] = val;
       }
@@ -279,11 +276,11 @@ async function startServer() {
       cleanads_test_mode: settingsMap.get('cleanads_test_mode') === 'true',
       shorts_ad_enabled: (settingsMap.get('shorts_ad_enabled') ?? 'true') === 'true',
       shorts_ad_every_n: Math.max(
-        3,
-        Math.min(10, Number.parseInt(settingsMap.get('shorts_ad_every_n') || '5', 10) || 5)
+        1,
+        Math.min(10, Number.parseInt(settingsMap.get('shorts_ad_every_n') || '1', 10) || 1)
       ),
-      shorts_download_ad_enabled: (settingsMap.get('shorts_download_ad_enabled') ?? 'true') === 'true',
-      shorts_api_base_url: settingsMap.get('shorts_api_base_url') || 'https://pulse-shorts.pages.dev',
+      shorts_download_ad_enabled: (settingsMap.get('shorts_download_ad_enabled') ?? 'false') === 'true',
+      shorts_channel_id: settingsMap.get('shorts_channel_id') || '',
       telegram_bot_username: settingsMap.get('telegram_bot_username') || '',
       telegram_miniapp_short_name: settingsMap.get('telegram_miniapp_short_name') || '',
       bot_token_configured: Boolean(token),
@@ -293,7 +290,7 @@ async function startServer() {
 
   app.post('/api/admin/settings', requireAdmin, (req, res) => {
     const body = (req.body || {}) as Record<string, unknown>;
-    const keys = [...PUBLIC_KEYS, 'bot_token'] as const;
+    const keys = [...PUBLIC_KEYS, 'shorts_channel_id', 'bot_token'] as const;
     for (const key of keys) {
       if (!(key in body)) continue;
       const raw = body[key];
@@ -308,8 +305,8 @@ async function startServer() {
         continue;
       }
       if (key === 'shorts_ad_every_n') {
-        const n = Number.parseInt(String(raw ?? '5'), 10);
-        settingsMap.set(key, String(Number.isFinite(n) ? Math.max(3, Math.min(10, n)) : 5));
+        const n = Number.parseInt(String(raw ?? '1'), 10);
+        settingsMap.set(key, String(Number.isFinite(n) ? Math.max(1, Math.min(10, n)) : 1));
         continue;
       }
       if (key === 'ad_provider') {
@@ -431,141 +428,37 @@ async function startServer() {
     });
   });
 
-  // Live Pulse Shorts proxy (/api/reels) for zero-CORS streaming
-  app.get('/api/reels', async (req, res) => {
-    const rawLimit = Number.parseInt(String(req.query.limit || '20'), 10);
-    const rawOffset = Number.parseInt(String(req.query.offset || '0'), 10);
-    const rawSeed = String(req.query.seed || '').trim();
-    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(50, rawLimit)) : 20;
-    const offset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset) : 0;
-    const seed = /^[a-zA-Z0-9_-]{1,32}$/.test(rawSeed)
-      ? rawSeed
-      : String(Math.floor(Math.random() * 1_000_000));
-
-    const configuredBase = (settingsMap.get('shorts_api_base_url') || 'https://pulse-shorts.pages.dev')
-      .trim()
-      .replace(/\/+$/, '');
-    let baseUrl = 'https://pulse-shorts.pages.dev';
-    try {
-      const parsed = new URL(configuredBase);
-      if (parsed.protocol === 'https:') baseUrl = parsed.origin;
-    } catch {
-      // Keep default
-    }
-
-    const resolveUrl = (raw?: unknown) => {
-      const s = typeof raw === 'string' ? raw.trim() : '';
-      if (!s) return '';
-      if (s.startsWith('https://') || s.startsWith('http://')) return s;
-      return s.startsWith('/') ? `${baseUrl}${s}` : `${baseUrl}/${s}`;
-    };
-
-    try {
-      const upstream = await fetch(
-        `${baseUrl}/api/videos?limit=${limit}&offset=${offset}&seed=${encodeURIComponent(seed)}`,
-        { headers: { Accept: 'application/json' } }
-      );
-      if (!upstream.ok) {
-        res.status(502).json({ error: `Pulse Shorts returned HTTP ${upstream.status}.`, videos: [], total: 0, has_more: false });
-        return;
-      }
-      const data = (await upstream.json()) as {
-        videos?: Array<Record<string, unknown>>;
-        total?: number;
-        has_more?: boolean;
-      };
-      const rawVideos = Array.isArray(data.videos) ? data.videos : [];
-      const videos = rawVideos
-        .map((item) => {
-          const id = typeof item.id === 'string' ? item.id.trim() : '';
-          const video_url = resolveUrl(item.video_url);
-          if (!id || !video_url) return null;
-          const tags = typeof item.tags === 'string' ? item.tags.trim() : '';
-          const tag_list = tags
-            ? tags
-                .split(',')
-                .map((t) => t.trim().replace(/^#+/, ''))
-                .filter(Boolean)
-                .slice(0, 6)
-            : [];
-          return {
-            id,
-            title: (typeof item.title === 'string' && item.title.trim()) || 'AI Edit Short',
-            video_url,
-            poster_url: resolveUrl(item.poster_url),
-            tags,
-            tag_list,
-            likes: Math.max(0, Number(item.likes) || 0) + (shortsLikesMap.get(id) || 0),
-            comments_count: Math.max(0, Number(item.comments_count) || 0),
-            created_at: typeof item.created_at === 'string' ? item.created_at : '',
-          };
-        })
-        .filter(Boolean);
-
-      res.setHeader('Cache-Control', 'no-store');
-      res.json({
-        videos,
-        total: typeof data.total === 'number' ? data.total : videos.length,
-        has_more: Boolean(data.has_more),
-        offset,
-        limit,
-        seed,
-      });
-    } catch {
-      res.status(502).json({ error: 'Could not reach Pulse Shorts upstream.', videos: [], total: 0, has_more: false });
-    }
+  // Self-hosted Shorts feed (starts empty until videos are posted to your private Telegram channel)
+  app.get('/api/shorts', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      videos: [],
+      total: 0,
+      has_more: false,
+      offset: 0,
+      limit: 12,
+    });
   });
 
-  app.post('/api/reels-like', (req, res) => {
+  app.post('/api/shorts-like', (req, res) => {
     const videoId = typeof req.body?.video_id === 'string' ? req.body.video_id.trim() : '';
-    const action = req.body?.action === 'unlike' ? 'unlike' : 'like';
-    if (!videoId || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(videoId)) {
-      res.status(400).json({ error: 'Invalid video ID.' });
+    if (!videoId) {
+      res.status(400).json({ error: 'Invalid short ID.' });
       return;
     }
-    const cur = shortsLikesMap.get(videoId) || 0;
-    const next = action === 'like' ? cur + 1 : Math.max(0, cur - 1);
-    shortsLikesMap.set(videoId, next);
-    res.json({ ok: true, video_id: videoId, delta_likes: next });
+    res.json({ ok: true, video_id: videoId, likes: 0 });
   });
 
-  app.get('/api/reels-download', async (req, res) => {
-    const rawTarget = String(req.query.url || '').trim();
-    const rawTitle = String(req.query.title || 'pulse-short').trim();
-    if (!rawTarget) {
-      res.status(400).json({ error: 'Missing video URL.' });
-      return;
-    }
-    let targetUrl: URL;
-    try {
-      targetUrl = new URL(rawTarget);
-    } catch {
-      res.status(400).json({ error: 'Invalid video URL.' });
-      return;
-    }
-    const host = targetUrl.hostname.toLowerCase();
-    if (
-      targetUrl.protocol !== 'https:' ||
-      host === 'localhost' ||
-      /^127\.|^10\.|^169\.254\.|^192\.168\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
-    ) {
-      res.status(403).json({ error: 'Disallowed host.' });
-      return;
-    }
-    try {
-      const upstream = await fetch(targetUrl.toString());
-      if (!upstream.ok || !upstream.body) {
-        res.status(502).json({ error: 'Upstream video unavailable.' });
-        return;
-      }
-      const slug = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
-      res.setHeader('Content-Type', upstream.headers.get('Content-Type') || 'video/mp4');
-      res.setHeader('Content-Disposition', `attachment; filename="${slug || 'pulse-short'}.mp4"`);
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      res.send(buf);
-    } catch {
-      res.status(502).json({ error: 'Could not download video.' });
-    }
+  app.get('/api/admin/shorts', requireAdmin, (_req, res) => {
+    res.json({
+      ok: true,
+      shorts_channel_id: settingsMap.get('shorts_channel_id') || '',
+      videos: [],
+    });
+  });
+
+  app.delete('/api/admin/shorts', requireAdmin, (req, res) => {
+    res.json({ ok: true, id: String(req.query.id || '') });
   });
 
   // Vite dev middleware or static dist serving
