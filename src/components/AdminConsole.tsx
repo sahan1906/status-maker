@@ -3,6 +3,8 @@ import {
   Activity,
   ArrowLeft,
   CheckCircle2,
+  Copy,
+  ExternalLink,
   Film,
   Loader2,
   Lock,
@@ -21,6 +23,7 @@ import {
   extractCleanAdsPlacementId,
   testCleanAdsPlacement,
 } from '../lib/adNetworks';
+import { buildShortsTelegramDirectLink } from '../lib/telegram';
 
 interface AdminStats {
   totalUsers: number;
@@ -43,6 +46,12 @@ interface AdminSettings {
   cleanads_interstitial_enabled: boolean;
   cleanads_interstitial_placement_id: string;
   cleanads_test_mode: boolean;
+  shorts_ad_enabled: boolean;
+  shorts_ad_every_n: number;
+  shorts_download_ad_enabled: boolean;
+  shorts_api_base_url: string;
+  telegram_bot_username: string;
+  telegram_miniapp_short_name: string;
   bot_token_configured: boolean;
   bot_token_masked: string;
 }
@@ -82,6 +91,12 @@ const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
   cleanads_interstitial_enabled: false,
   cleanads_interstitial_placement_id: '',
   cleanads_test_mode: false,
+  shorts_ad_enabled: true,
+  shorts_ad_every_n: 5,
+  shorts_download_ad_enabled: true,
+  shorts_api_base_url: 'https://pulse-shorts.pages.dev',
+  telegram_bot_username: '',
+  telegram_miniapp_short_name: '',
   bot_token_configured: false,
   bot_token_masked: '',
 };
@@ -109,6 +124,7 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
 
   const [webhookLoading, setWebhookLoading] = useState(false);
   const [webhookMsg, setWebhookMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [copiedDirectLink, setCopiedDirectLink] = useState(false);
   const [testingCleanAds, setTestingCleanAds] = useState<'rewarded' | 'interstitial' | null>(null);
   const [cleanAdsTestMsg, setCleanAdsTestMsg] = useState<{ ok: boolean; text: string } | null>(
     null
@@ -285,6 +301,12 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
           settings.cleanads_interstitial_placement_id
         ),
         cleanads_test_mode: settings.cleanads_test_mode,
+        shorts_ad_enabled: settings.shorts_ad_enabled,
+        shorts_ad_every_n: Math.max(3, Math.min(10, Number(settings.shorts_ad_every_n) || 5)),
+        shorts_download_ad_enabled: settings.shorts_download_ad_enabled,
+        shorts_api_base_url: settings.shorts_api_base_url.trim() || 'https://pulse-shorts.pages.dev',
+        telegram_bot_username: settings.telegram_bot_username.replace(/^@+/, '').trim(),
+        telegram_miniapp_short_name: settings.telegram_miniapp_short_name.trim(),
       };
       if (newBotToken.trim()) {
         payload.bot_token = newBotToken.trim();
@@ -1084,6 +1106,201 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                     {cleanAdsTestMsg.text}
                   </p>
                 )}
+              </div>
+
+              {/* Hidden /shorts Feed Monetization & Telegram Direct Link */}
+              <div className="md:col-span-2 rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-white">
+                      Shorts Feed (<code className="font-mono text-amber-300">/shorts</code>) &amp; Telegram Direct Link
+                    </h2>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      Streams live from Pulse Shorts with zero re-uploading. Hidden from the main editor navigation until you choose its placement.
+                    </p>
+                  </div>
+
+                  <a
+                    href="/shorts"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="min-h-[38px] px-3.5 text-xs font-semibold rounded-xl bg-white/[0.08] border border-white/15 text-white hover:bg-white/[0.14] inline-flex items-center gap-1.5 transition whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Preview /shorts</span>
+                  </a>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  {/* Swipe Ad Gate & Download Ad Controls */}
+                  <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-4">
+                    <label className="flex items-center justify-between gap-3 cursor-pointer">
+                      <div>
+                        <span className="text-xs font-semibold text-white block">
+                          Swipe Ad Gate on /shorts
+                        </span>
+                        <span className="text-[11px] text-zinc-400">
+                          Prompt 1 ad after every {settings.shorts_ad_every_n} swipes to continue watching
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.shorts_ad_enabled}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, shorts_ad_enabled: e.target.checked }))
+                        }
+                        className="h-5 w-5 accent-amber-400 rounded shrink-0"
+                      />
+                    </label>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-zinc-400">Swipes Before Ad (3–10)</span>
+                        <span className="font-mono tabular-nums font-semibold text-amber-300">
+                          Every {settings.shorts_ad_every_n} swipes
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={3}
+                        max={10}
+                        step={1}
+                        value={settings.shorts_ad_every_n}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            shorts_ad_every_n: Math.max(3, Math.min(10, Number(e.target.value) || 5)),
+                          }))
+                        }
+                        className="w-full accent-amber-400 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[10px] font-mono text-zinc-500">
+                        <span>3</span>
+                        <span>5 (Default)</span>
+                        <span>7</span>
+                        <span>10</span>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center justify-between gap-3 pt-2 border-t border-white/10 cursor-pointer">
+                      <div>
+                        <span className="text-xs font-semibold text-white block">
+                          Rewarded Ad for Save / Download
+                        </span>
+                        <span className="text-[11px] text-zinc-400">
+                          Require 1 rewarded ad before saving a Short MP4
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.shorts_download_ad_enabled}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            shorts_download_ad_enabled: e.target.checked,
+                          }))
+                        }
+                        className="h-5 w-5 accent-amber-400 rounded shrink-0"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Upstream API & Telegram Mini App Direct Link */}
+                  <div className="rounded-xl bg-[#08080A] border border-white/10 p-4 space-y-3.5">
+                    <label className="block space-y-1.5">
+                      <span className="text-xs text-zinc-400">Pulse Shorts API Base URL</span>
+                      <input
+                        type="url"
+                        value={settings.shorts_api_base_url}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, shorts_api_base_url: e.target.value }))
+                        }
+                        placeholder="https://pulse-shorts.pages.dev"
+                        className="w-full min-h-[42px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                      />
+                    </label>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="block space-y-1.5">
+                        <span className="text-xs text-zinc-400">Telegram Bot Username</span>
+                        <input
+                          type="text"
+                          value={settings.telegram_bot_username}
+                          onChange={(e) =>
+                            setSettings((s) => ({
+                              ...s,
+                              telegram_bot_username: e.target.value.replace(/^@+/, ''),
+                            }))
+                          }
+                          placeholder="YourReelCraftBot"
+                          className="w-full min-h-[42px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                        />
+                      </label>
+
+                      <label className="block space-y-1.5">
+                        <span className="text-xs text-zinc-400">Mini App Short Name</span>
+                        <input
+                          type="text"
+                          value={settings.telegram_miniapp_short_name}
+                          onChange={(e) =>
+                            setSettings((s) => ({
+                              ...s,
+                              telegram_miniapp_short_name: e.target.value,
+                            }))
+                          }
+                          placeholder="Optional (e.g. app)"
+                          className="w-full min-h-[42px] px-3 text-xs font-mono rounded-xl bg-[#111114] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Ready-to-copy Telegram Mini App Direct Link */}
+                    <div className="pt-2 border-t border-white/10 space-y-1.5">
+                      <span className="text-[11px] font-medium text-zinc-400 block">
+                        Telegram Mini App Direct Link (Opens inside Telegram, not browser)
+                      </span>
+                      {(() => {
+                        const directLink = buildShortsTelegramDirectLink(
+                          settings.telegram_bot_username,
+                          settings.telegram_miniapp_short_name
+                        );
+                        return (
+                          <div className="flex items-center gap-2">
+                            <code className="flex-1 min-w-0 truncate px-3 py-2.5 text-[11px] font-mono rounded-xl bg-[#111114] border border-white/10 text-amber-300">
+                              {directLink}
+                            </code>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(directLink).catch(() => {});
+                                setCopiedDirectLink(true);
+                                window.setTimeout(() => setCopiedDirectLink(false), 2000);
+                              }}
+                              className="min-h-[40px] px-3 text-xs font-semibold rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 flex items-center gap-1.5 shrink-0 transition"
+                            >
+                              {copiedDirectLink ? (
+                                <>
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  <span>Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3.5 h-3.5" />
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        );
+                      })()}
+                      {!settings.telegram_bot_username && (
+                        <p className="text-[11px] text-zinc-500">
+                          Enter your Bot Username (or save your Bot Token) to generate a <code className="font-mono text-zinc-400">https://t.me/...</code> Mini App link.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </form>

@@ -3,6 +3,7 @@ import { ArrowLeft, Download, Images, LayoutGrid } from 'lucide-react';
 import { AdminConsole } from './components/AdminConsole';
 import { DownloadVideoModal } from './components/DownloadVideoModal';
 import { GalleryPhoto, PhotoTextEditor } from './components/PhotoTextEditor';
+import { ShortsFeedView } from './components/ShortsFeedView';
 import { TemplateGallery } from './components/TemplateGallery';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import {
@@ -25,6 +26,7 @@ import {
   shouldTriggerRewardAd,
 } from './lib/adNetworks';
 import {
+  getInitialShortsRouteState,
   haptic,
   initTelegramApp,
   TelegramContextInfo,
@@ -61,9 +63,12 @@ function makeSampleGallery(template: ReelTemplate): GalleryPhoto[] {
 }
 
 export default function App() {
-  // Hidden /admin route (never linked anywhere in user-facing UI)
+  // Hidden /admin and /shorts (or Telegram ?startapp=shorts) routes — never linked in main UI
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() =>
     typeof window !== 'undefined' && window.location.pathname.replace(/\/+$/, '') === '/admin'
+  );
+  const [shortsRoute, setShortsRoute] = useState<{ isShorts: boolean; initialVideoId: string }>(
+    () => getInitialShortsRouteState()
   );
 
   const [appConfig, setAppConfig] = useState<PublicAppConfig>(DEFAULT_APP_CONFIG);
@@ -72,6 +77,7 @@ export default function App() {
     initData: '',
     userId: '',
     username: '',
+    startParam: '',
   });
 
   // Clean 2-view workflow: Templates & Media Editor (starts Blank by default)
@@ -181,11 +187,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setTgContext(initTelegramApp());
+    const tgInfo = initTelegramApp();
+    setTgContext(tgInfo);
+    if (tgInfo.startParam === 'shorts') {
+      setShortsRoute({ isShorts: true, initialVideoId: '' });
+    } else if (tgInfo.startParam.startsWith('short_') && tgInfo.startParam.length > 6) {
+      setShortsRoute({ isShorts: true, initialVideoId: tgInfo.startParam.slice(6).trim() });
+    }
     refreshConfig();
 
     const onPop = () => {
       setIsAdminRoute(window.location.pathname.replace(/\/+$/, '') === '/admin');
+      setShortsRoute(getInitialShortsRouteState());
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -1021,6 +1034,21 @@ export default function App() {
           setIsAdminRoute(false);
         }}
         onConfigUpdated={refreshConfig}
+      />
+    );
+  }
+
+  if (shortsRoute.isShorts) {
+    return (
+      <ShortsFeedView
+        appConfig={appConfig}
+        tgContext={tgContext}
+        initialVideoId={shortsRoute.initialVideoId}
+        onOpenStudio={() => {
+          window.history.pushState({}, '', '/');
+          setShortsRoute({ isShorts: false, initialVideoId: '' });
+          setView('templates');
+        }}
       />
     );
   }

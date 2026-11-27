@@ -43,6 +43,12 @@ export const PUBLIC_SETTING_KEYS = [
   'cleanads_interstitial_enabled',
   'cleanads_interstitial_placement_id',
   'cleanads_test_mode',
+  'shorts_ad_enabled',
+  'shorts_ad_every_n',
+  'shorts_download_ad_enabled',
+  'shorts_api_base_url',
+  'telegram_bot_username',
+  'telegram_miniapp_short_name',
 ] as const;
 
 export const EDITABLE_SETTING_KEYS = [

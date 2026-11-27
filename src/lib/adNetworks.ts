@@ -15,6 +15,12 @@ export interface PublicAppConfig {
   cleanads_interstitial_enabled: boolean;
   cleanads_interstitial_placement_id: string;
   cleanads_test_mode: boolean;
+  shorts_ad_enabled: boolean;
+  shorts_ad_every_n: number;
+  shorts_download_ad_enabled: boolean;
+  shorts_api_base_url: string;
+  telegram_bot_username: string;
+  telegram_miniapp_short_name: string;
 }
 
 export const DEFAULT_APP_CONFIG: PublicAppConfig = {
@@ -32,6 +38,12 @@ export const DEFAULT_APP_CONFIG: PublicAppConfig = {
   cleanads_interstitial_enabled: false,
   cleanads_interstitial_placement_id: '',
   cleanads_test_mode: false,
+  shorts_ad_enabled: true,
+  shorts_ad_every_n: 5,
+  shorts_download_ad_enabled: true,
+  shorts_api_base_url: 'https://pulse-shorts.pages.dev',
+  telegram_bot_username: '',
+  telegram_miniapp_short_name: '',
 };
 
 interface CleanAdsResult {
@@ -481,6 +493,47 @@ export async function runInterstitialAd(config: PublicAppConfig): Promise<boolea
     return true;
   }
   return false;
+}
+
+export function shouldTriggerShortsSwipeAd(config: PublicAppConfig): boolean {
+  if (!config.shorts_ad_enabled) return false;
+  return (
+    isCleanAdsRewardedActive(config) ||
+    isLegacyRewardedActive(config) ||
+    isCleanAdsInterstitialActive(config)
+  );
+}
+
+/**
+ * Triggers the Shorts N-swipe unlock ad using whichever ad network is configured in Admin
+ * (CleanAds Rewarded -> Legacy AdsGram/Monetag/RichAds/GigaPub -> CleanAds Interstitial).
+ */
+export async function runShortsSwipeAd(
+  config: PublicAppConfig
+): Promise<'completed' | 'skipped' | 'cancelled'> {
+  if (!config.shorts_ad_enabled) return 'skipped';
+
+  if (isCleanAdsRewardedActive(config) || isLegacyRewardedActive(config)) {
+    return runRewardedAd(config);
+  }
+
+  if (isCleanAdsInterstitialActive(config)) {
+    const { outcome } = await runCleanAdsUnitDetailed(
+      config.cleanads_interstitial_placement_id,
+      config.cleanads_test_mode,
+      false
+    );
+    if (outcome === 'completed') {
+      lastAdShownAt = Date.now();
+      return 'completed';
+    }
+    if (outcome === 'cancelled') {
+      return 'cancelled';
+    }
+    return 'skipped';
+  }
+
+  return 'skipped';
 }
 
 export async function fetchPublicAppConfig(): Promise<PublicAppConfig> {

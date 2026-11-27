@@ -10,11 +10,13 @@ interface TelegramWebApp {
   platform?: string;
   initDataUnsafe?: {
     user?: TelegramUser;
+    start_param?: string;
   };
   ready: () => void;
   expand: () => void;
   isVersionAtLeast?: (version: string) => boolean;
   openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
+  openTelegramLink?: (url: string) => void;
   downloadFile?: (
     params: { url: string; file_name: string },
     callback?: (accepted: boolean) => void
@@ -40,12 +42,90 @@ export interface TelegramContextInfo {
   initData: string;
   userId: string;
   username: string;
+  startParam: string;
+}
+
+export function readTelegramStartParam(): string {
+  if (typeof window === 'undefined') return '';
+  const tgStart = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
+  if (typeof tgStart === 'string' && tgStart.trim()) {
+    return tgStart.trim();
+  }
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = params.get('tgWebAppStartParam') || params.get('startapp') || '';
+    return fromQuery.trim();
+  } catch {
+    return '';
+  }
+}
+
+export function getInitialShortsRouteState(): {
+  isShorts: boolean;
+  initialVideoId: string;
+} {
+  if (typeof window === 'undefined') {
+    return { isShorts: false, initialVideoId: '' };
+  }
+
+  const pathname = window.location.pathname.replace(/\/+$/, '');
+  const params = new URLSearchParams(window.location.search);
+  const startParam = readTelegramStartParam();
+
+  if (startParam === 'shorts') {
+    return { isShorts: true, initialVideoId: '' };
+  }
+  if (startParam.startsWith('short_') && startParam.length > 6) {
+    return { isShorts: true, initialVideoId: startParam.slice(6).trim() };
+  }
+  if (pathname === '/shorts') {
+    return { isShorts: true, initialVideoId: (params.get('v') || '').trim() };
+  }
+
+  return { isShorts: false, initialVideoId: '' };
+}
+
+export function buildShortsTelegramDirectLink(
+  botUsername: string,
+  miniAppShortName: string,
+  videoId?: string
+): string {
+  const cleanBot = (botUsername || '').replace(/^@+/, '').trim();
+  const cleanApp = (miniAppShortName || '').trim();
+  const startVal = videoId ? `short_${videoId}` : 'shorts';
+
+  if (cleanBot) {
+    if (cleanApp) {
+      return `https://t.me/${cleanBot}/${cleanApp}?startapp=${encodeURIComponent(startVal)}`;
+    }
+    return `https://t.me/${cleanBot}?startapp=${encodeURIComponent(startVal)}`;
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}/shorts${videoId ? `?v=${encodeURIComponent(videoId)}` : ''}`;
+  }
+  return `/shorts${videoId ? `?v=${encodeURIComponent(videoId)}` : ''}`;
+}
+
+export function openTelegramShareUrl(shareUrl: string, text: string): boolean {
+  const tg = window.Telegram?.WebApp;
+  const tgShare = `https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(text)}`;
+  if (tg && typeof tg.openTelegramLink === 'function') {
+    try {
+      tg.openTelegramLink(tgShare);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export function initTelegramApp(): TelegramContextInfo {
   const tg = window.Telegram?.WebApp;
+  const startParam = readTelegramStartParam();
   if (!tg) {
-    return { isTelegram: false, initData: '', userId: '', username: '' };
+    return { isTelegram: false, initData: '', userId: '', username: '', startParam };
   }
 
   try {
@@ -64,6 +144,7 @@ export function initTelegramApp(): TelegramContextInfo {
     initData: tg.initData || '',
     userId: user?.id ? String(user.id) : '',
     username: user?.username || user?.first_name || '',
+    startParam,
   };
 }
 
