@@ -18,6 +18,7 @@ import {
 interface TemplateGalleryProps {
   selectedTemplate: ReelTemplate;
   activeCategory: TemplateCategory;
+  customTemplates?: ReelTemplate[];
   watermarkEnabled: boolean;
   watermarkText: string;
   onCategoryChange: (cat: TemplateCategory) => void;
@@ -131,21 +132,35 @@ function MiniPreviewCard({
         onClick={onSelect}
         className="relative aspect-[9/16] w-full overflow-hidden bg-[#0B0B0E] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
       >
-        <canvas
-          ref={canvasRef}
-          width={270}
-          height={480}
-          className="h-full w-full block object-cover"
-          aria-label={`Animated preview of ${template.name} template`}
-        />
-
-        {images.length === 0 && (
-          <img
-            src={template.samplePhotos[0]}
-            alt={template.name}
-            referrerPolicy="no-referrer"
-            className="absolute inset-0 h-full w-full object-cover opacity-70"
+        {template.presetOverlayUrl ? (
+          <video
+            src={template.presetOverlayUrl}
+            muted
+            loop
+            playsInline
+            autoPlay
+            crossOrigin="anonymous"
+            className="h-full w-full block object-cover"
           />
+        ) : (
+          <>
+            <canvas
+              ref={canvasRef}
+              width={270}
+              height={480}
+              className="h-full w-full block object-cover"
+              aria-label={`Animated preview of ${template.name} template`}
+            />
+
+            {images.length === 0 && (
+              <img
+                src={template.samplePhotos[0]}
+                alt={template.name}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 h-full w-full object-cover opacity-70"
+              />
+            )}
+          </>
         )}
 
         {isSelected && (
@@ -157,9 +172,15 @@ function MiniPreviewCard({
 
       <div className="p-3.5 flex flex-col justify-between gap-3 flex-1">
         <div>
-          <div className="flex items-baseline justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-white truncate">{template.name}</h3>
-            <span className="text-[11px] font-mono text-zinc-400 shrink-0">{template.badge}</span>
+            <span className="inline-flex items-center gap-1 text-[10px] font-mono text-zinc-300 shrink-0">
+              <span
+                className="h-1.5 w-1.5 rounded-full shrink-0"
+                style={{ backgroundColor: template.accentColor }}
+              />
+              {template.badge}
+            </span>
           </div>
           <p className="mt-1 text-xs text-zinc-400 line-clamp-2 leading-relaxed">
             {template.tagline}
@@ -175,7 +196,7 @@ function MiniPreviewCard({
               : 'bg-white/[0.06] text-zinc-100 border border-white/10 hover:bg-white/[0.12]'
           }`}
         >
-          <span>{isSelected ? 'Open Editor' : 'Use Style'}</span>
+          <span>{isSelected ? 'Open Editor' : 'Use Edit'}</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
@@ -186,14 +207,23 @@ function MiniPreviewCard({
 export function TemplateGallery({
   selectedTemplate,
   activeCategory,
+  customTemplates = [],
   watermarkEnabled,
   watermarkText,
   onCategoryChange,
   onSelectTemplate,
 }: TemplateGalleryProps) {
+  const allTemplates = useMemo(
+    () => [...customTemplates, ...REEL_TEMPLATES],
+    [customTemplates]
+  );
+
   const templatesInCategory = useMemo(
-    () => REEL_TEMPLATES.filter((t) => t.category === activeCategory),
-    [activeCategory]
+    () =>
+      activeCategory === 'all'
+        ? allTemplates
+        : allTemplates.filter((t) => t.category === activeCategory),
+    [activeCategory, allTemplates]
   );
 
   const isBlankSelected = selectedTemplate.id === BLANK_TEMPLATE.id;
@@ -202,10 +232,10 @@ export function TemplateGallery({
     <section aria-label="Template catalog" className="space-y-5">
       <div className="space-y-1.5">
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white [text-wrap:balance]">
-          Cinematic templates for Status &amp; Reels
+          1-Tap Viral Edits
         </h1>
         <p className="text-sm text-zinc-400">
-          Start blank with photos &amp; videos, or pick one of 25 silent 9:16 styles.
+          Pick a vibe, drop your photos or videos, hit download — zero editing skills needed.
         </p>
       </div>
 

@@ -48,10 +48,12 @@ interface PhotoTextEditorProps {
   pace: PaceMode;
   landscapeTilt: LandscapeTilt;
   transitionChoice: TransitionChoice;
+  chromaSensitivity: number;
   isLoadingMedia?: boolean;
   mediaError?: string | null;
   onAddPhotos: (files: FileList) => void;
   onAddVideos: (files: FileList) => void;
+  onSetGreenScreenVideo?: (files: FileList) => void;
   onRemovePhoto: (id: string) => void;
   onMovePhoto: (fromIdx: number, toIdx: number) => void;
   onTrimClip: (id: string, trimStart: number, trimEnd: number) => void;
@@ -63,6 +65,7 @@ interface PhotoTextEditorProps {
   onPaceChange: (pace: PaceMode) => void;
   onLandscapeTiltChange: (tilt: LandscapeTilt) => void;
   onTransitionChange: (choice: TransitionChoice) => void;
+  onChromaSensitivityChange: (val: number) => void;
 }
 
 const PACE_OPTIONS: { id: PaceMode; label: string; desc: string }[] = [
@@ -99,10 +102,12 @@ export function PhotoTextEditor({
   pace,
   landscapeTilt,
   transitionChoice,
+  chromaSensitivity,
   isLoadingMedia = false,
   mediaError = null,
   onAddPhotos,
   onAddVideos,
+  onSetGreenScreenVideo,
   onRemovePhoto,
   onMovePhoto,
   onTrimClip,
@@ -114,6 +119,7 @@ export function PhotoTextEditor({
   onPaceChange,
   onLandscapeTiltChange,
   onTransitionChange,
+  onChromaSensitivityChange,
 }: PhotoTextEditorProps) {
   const [activeTool, setActiveTool] = useState<EditorTool>('photos');
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
@@ -123,19 +129,48 @@ export function PhotoTextEditor({
 
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const greenVideoInputRef = useRef<HTMLInputElement | null>(null);
 
   const hasOnlySamples = photos.every((p) => p.isSample);
   const slideSec = getSlideDuration(template, pace);
+  const specialMode = template.specialMode ?? 'none';
+  const isPresetOverlay = Boolean(template.presetOverlayUrl);
+  const isChromaMode = specialMode === 'chroma-green-screen';
+  const isMapMode = specialMode === 'map-route-zoom';
+  const isTrainMapMode = specialMode === 'india-train-map';
+  const isVnShadowMode = specialMode === 'vn-shadow-reveal';
+  const isTextZoomMode = specialMode === 'marvel-intro' || specialMode === 'text-portal';
+  const chromaForegroundIdx =
+    isChromaMode && !isPresetOverlay ? photos.findIndex((p) => p.kind === 'video') : -1;
+  const chromaForegroundClip = chromaForegroundIdx >= 0 ? photos[chromaForegroundIdx] : null;
+
   const estTotal = Number(
     (
-      photos.reduce((acc, clip) => {
-        if (clip.kind === 'video') {
-          const start = clip.trimStart ?? 0;
-          const end = clip.trimEnd ?? clip.sourceDuration ?? 3;
-          return acc + Math.max(MIN_VIDEO_CLIP_SEC, end - start);
-        }
-        return acc + slideSec;
-      }, 0) + (template.overlay === 'kinetic-intro' && (title.trim() || subtitle.trim()) ? 1.0 : 0)
+      isChromaMode && chromaForegroundClip
+        ? Math.max(
+            MIN_VIDEO_CLIP_SEC,
+            (chromaForegroundClip.trimEnd ?? chromaForegroundClip.sourceDuration ?? 3) -
+              (chromaForegroundClip.trimStart ?? 0)
+          )
+        : photos.reduce((acc, clip) => {
+            if (clip.kind === 'video') {
+              const start = clip.trimStart ?? 0;
+              const end = clip.trimEnd ?? clip.sourceDuration ?? 3;
+              return acc + Math.max(MIN_VIDEO_CLIP_SEC, end - start);
+            }
+            return acc + slideSec;
+          }, 0) +
+          (isTrainMapMode
+            ? 3.55
+            : isMapMode
+            ? 3.35
+            : isTextZoomMode
+            ? title.trim()
+              ? 3.15
+              : 0
+            : template.overlay === 'kinetic-intro' && (title.trim() || subtitle.trim())
+            ? 1.0
+            : 0)
     ).toFixed(1)
   );
 
@@ -176,6 +211,17 @@ export function PhotoTextEditor({
   const handleVideoFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       onAddVideos(e.target.files);
+      e.target.value = '';
+    }
+  };
+
+  const handleGreenVideoFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      if (onSetGreenScreenVideo) {
+        onSetGreenScreenVideo(e.target.files);
+      } else {
+        onAddVideos(e.target.files);
+      }
       e.target.value = '';
     }
   };
@@ -235,6 +281,14 @@ export function PhotoTextEditor({
         onChange={handleVideoFileChange}
         className="sr-only"
         aria-label="Pick video clips from gallery"
+      />
+      <input
+        ref={greenVideoInputRef}
+        type="file"
+        accept="video/*"
+        onChange={handleGreenVideoFileChange}
+        className="sr-only"
+        aria-label="Pick your green-screen foreground video"
       />
 
       {/* CapCut / InShot Tool Selector Row */}
@@ -339,8 +393,119 @@ export function PhotoTextEditor({
               </div>
             </div>
 
-            {/* Horizontal scrollable filmstrip with dedicated + Photo and + Video buttons */}
+            {/* Special FX quick guidance strip */}
+            {isChromaMode && isPresetOverlay && (
+              <div className="rounded-xl bg-pink-500/10 border border-pink-400/25 px-3 py-1.5 text-[11px] text-pink-100 flex items-center justify-between gap-2">
+                <span className="truncate">
+                  Premade AI overlay active in front · Tap + Photo or + Video for your background
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveTool('transition')}
+                  className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-pink-300 hover:text-white underline underline-offset-2"
+                >
+                  Key FX
+                </button>
+              </div>
+            )}
+
+            {isChromaMode && !isPresetOverlay && (
+              <div className="rounded-xl bg-emerald-500/10 border border-emerald-400/25 px-3 py-1.5 text-[11px] text-emerald-200 flex items-center justify-between gap-2">
+                <span className="truncate">
+                  {chromaForegroundClip
+                    ? `Green Video active (FG #${chromaForegroundIdx + 1}) · other photos/videos play inside green`
+                    : 'Step 1: Tap + Green Vid for your green-screen video · Step 2: Add photos/videos'}
+                </span>
+                {chromaForegroundClip && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTool('transition')}
+                    className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-emerald-300 hover:text-white underline underline-offset-2"
+                  >
+                    Key FX
+                  </button>
+                )}
+              </div>
+            )}
+
+            {isMapMode && (
+              <button
+                type="button"
+                onClick={() => setActiveTool('text')}
+                className="w-full rounded-xl bg-sky-500/10 border border-sky-400/25 hover:border-sky-400/45 px-3 py-1.5 text-[11px] text-sky-100 flex items-center justify-between gap-2 transition"
+              >
+                <span className="truncate">
+                  Map Route:{' '}
+                  <strong className="text-white">
+                    {title.trim() || 'ORIGIN'} ✈ {subtitle.trim() || 'DESTINATION'}
+                  </strong>
+                </span>
+                <span className="shrink-0 text-[10px] font-semibold text-sky-300">
+                  Edit cities
+                </span>
+              </button>
+            )}
+
+            {isTrainMapMode && (
+              <button
+                type="button"
+                onClick={() => setActiveTool('text')}
+                className="w-full rounded-xl bg-orange-500/10 border border-orange-400/25 hover:border-orange-400/45 px-3 py-1.5 text-[11px] text-orange-100 flex items-center justify-between gap-2 transition"
+              >
+                <span className="truncate">
+                  India Train:{' '}
+                  <strong className="text-white">
+                    {title.trim() || 'DELHI'} 🚆 {subtitle.trim() || 'GOA'}
+                  </strong>
+                </span>
+                <span className="shrink-0 text-[10px] font-semibold text-orange-300">
+                  Edit stations
+                </span>
+              </button>
+            )}
+
+            {isVnShadowMode && (
+              <div className="rounded-xl bg-white/[0.04] border border-white/10 px-3 py-1.5 text-[11px] text-zinc-300 truncate">
+                VN Thin Mirror Mask active · Best with portraits, bikes &amp; bold vertical shots
+              </div>
+            )}
+
+            {isTextZoomMode && (
+              <button
+                type="button"
+                onClick={() => setActiveTool('text')}
+                className="w-full rounded-xl bg-white/[0.04] border border-white/10 hover:border-white/25 px-3 py-1.5 text-[11px] text-zinc-200 flex items-center justify-between gap-2 transition"
+              >
+                <span className="truncate">
+                  Zoom-In Name:{' '}
+                  <strong className="text-white">{title.trim() || 'None (off)'}</strong>
+                </span>
+                <span className="shrink-0 text-[10px] font-semibold text-zinc-400">
+                  Tap to change
+                </span>
+              </button>
+            )}
+
+            {/* Horizontal scrollable filmstrip with dedicated pickers */}
             <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+              {isChromaMode && !isPresetOverlay && (
+                <button
+                  type="button"
+                  onClick={() => greenVideoInputRef.current?.click()}
+                  disabled={isLoadingMedia}
+                  className="shrink-0 w-[74px] h-[94px] rounded-xl bg-emerald-400 text-[#05140B] hover:bg-emerald-300 disabled:opacity-40 flex flex-col items-center justify-center gap-1 px-1 text-center transition"
+                >
+                  {isLoadingMedia ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Video className="w-4 h-4" />
+                  )}
+                  <span className="text-[10px] font-extrabold leading-tight">
+                    {chromaForegroundClip ? 'Swap Green' : '+ Green Vid'}
+                  </span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => photoInputRef.current?.click()}
@@ -348,7 +513,9 @@ export function PhotoTextEditor({
                 className="shrink-0 w-[68px] h-[94px] rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 disabled:opacity-40 flex flex-col items-center justify-center gap-1 transition"
               >
                 <ImagePlus className="w-4 h-4" />
-                <span className="text-[10px] font-bold">+ Photo</span>
+                <span className="text-[10px] font-bold">
+                  {isChromaMode && !isPresetOverlay ? '+ Photos' : '+ Photo'}
+                </span>
               </button>
 
               <button
@@ -362,11 +529,14 @@ export function PhotoTextEditor({
                 ) : (
                   <Video className="w-4 h-4" />
                 )}
-                <span className="text-[10px] font-bold">+ Video</span>
+                <span className="text-[10px] font-bold">
+                  {isChromaMode && !isPresetOverlay ? '+ Inside Vid' : '+ Video'}
+                </span>
               </button>
 
               {photos.map((photo, idx) => {
                 const isSelected = idx === activeIdx;
+                const isGreenFg = isChromaMode && idx === chromaForegroundIdx;
                 const clipLen =
                   photo.kind === 'video'
                     ? Math.max(
@@ -388,6 +558,8 @@ export function PhotoTextEditor({
                         ? 'opacity-50 border-white/60'
                         : isSelected
                         ? 'border-white ring-2 ring-white/25'
+                        : isGreenFg
+                        ? 'border-emerald-400/70'
                         : 'border-white/10 hover:border-white/30'
                     }`}
                   >
@@ -400,6 +572,11 @@ export function PhotoTextEditor({
                     <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/75 text-[10px] font-mono text-white tabular-nums">
                       {idx + 1}
                     </span>
+                    {isGreenFg && (
+                      <span className="absolute top-1 right-1 px-1 py-0.5 rounded bg-emerald-500 text-[#05140B] text-[8px] font-extrabold uppercase tracking-tight">
+                        FG
+                      </span>
+                    )}
                     {photo.kind === 'video' && clipLen !== null && (
                       <span className="absolute bottom-1 left-1 right-1 px-1 py-0.5 rounded bg-black/80 text-[9px] font-mono text-amber-300 flex items-center justify-center gap-0.5 tabular-nums">
                         <Film className="w-2.5 h-2.5 shrink-0" />
@@ -618,33 +795,59 @@ export function PhotoTextEditor({
           </div>
         )}
 
-        {/* 3. INSHOT PRO TRANSITIONS DROPDOWN */}
+        {/* 3. INSHOT PRO TRANSITIONS & CHROMA KEY CONTROLS */}
         {activeTool === 'transition' && (
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <label htmlFor="pro-transition-select" className="text-zinc-400 font-medium">
-                Transition Style
-              </label>
-              <span className="font-mono text-zinc-200">{activeTransitionLabel}</span>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <label htmlFor="pro-transition-select" className="text-zinc-400 font-medium">
+                  {isChromaMode ? 'Inside-Screen Transition' : 'Transition Style'}
+                </label>
+                <span className="font-mono text-zinc-200">{activeTransitionLabel}</span>
+              </div>
+
+              <div className="relative">
+                <select
+                  id="pro-transition-select"
+                  value={transitionChoice}
+                  onChange={(e) => onTransitionChange(e.target.value as TransitionChoice)}
+                  className="w-full min-h-[48px] appearance-none rounded-xl bg-[#08080A] border border-white/15 pl-4 pr-11 text-sm font-medium text-white focus:outline-none focus:border-white/45 cursor-pointer transition"
+                >
+                  {TRANSITION_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id} className="bg-[#111114] text-white">
+                      {preset.id === 'auto'
+                        ? `Template Auto (${TRANSITION_PRESETS.find((t) => t.id === template.transition)?.label || template.transition})`
+                        : preset.label}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+              </div>
             </div>
 
-            <div className="relative">
-              <select
-                id="pro-transition-select"
-                value={transitionChoice}
-                onChange={(e) => onTransitionChange(e.target.value as TransitionChoice)}
-                className="w-full min-h-[48px] appearance-none rounded-xl bg-[#08080A] border border-white/15 pl-4 pr-11 text-sm font-medium text-white focus:outline-none focus:border-white/45 cursor-pointer transition"
-              >
-                {TRANSITION_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id} className="bg-[#111114] text-white">
-                    {preset.id === 'auto'
-                      ? `Template Auto (${TRANSITION_PRESETS.find((t) => t.id === template.transition)?.label || template.transition})`
-                      : preset.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-            </div>
+            {isChromaMode && (
+              <label className="block space-y-1.5 pt-2.5 border-t border-white/10">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-emerald-300 font-medium">Green Screen Sensitivity</span>
+                  <span className="font-mono text-white tabular-nums">
+                    {Math.round(chromaSensitivity * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.15}
+                  max={0.95}
+                  step={0.02}
+                  value={chromaSensitivity}
+                  onChange={(e) => onChromaSensitivityChange(Number(e.target.value))}
+                  aria-label="Green screen chroma key sensitivity"
+                  className="w-full accent-emerald-400 h-1.5 cursor-pointer"
+                />
+                <p className="text-[11px] text-zinc-500">
+                  Raise to remove darker green edges; lower if hands or skin start fading.
+                </p>
+              </label>
+            )}
           </div>
         )}
 
@@ -672,27 +875,53 @@ export function PhotoTextEditor({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="block space-y-1">
-                <span className="text-[11px] font-medium text-zinc-400">Title (Optional)</span>
+                <span className="text-[11px] font-medium text-zinc-400">
+                  {isTrainMapMode
+                    ? 'From Station / City (India)'
+                    : isMapMode
+                    ? 'From City (Departure)'
+                    : isTextZoomMode
+                    ? 'Zoom-In Name'
+                    : 'Title (Optional)'}
+                </span>
                 <input
                   type="text"
                   maxLength={36}
                   value={title}
                   onChange={(e) => onTitleChange(e.target.value)}
-                  placeholder="No title"
+                  placeholder={
+                    isTrainMapMode
+                      ? 'e.g. DELHI, MUMBAI, CHENNAI'
+                      : isMapMode
+                      ? 'e.g. MUMBAI'
+                      : isTextZoomMode
+                      ? 'YOUR NAME'
+                      : 'No title'
+                  }
                   className="w-full min-h-[42px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
                 />
               </label>
 
               <label className="block space-y-1">
                 <span className="text-[11px] font-medium text-zinc-400">
-                  Subtitle / Date (Optional)
+                  {isTrainMapMode
+                    ? 'To Station / City (India)'
+                    : isMapMode
+                    ? 'To City (Destination)'
+                    : 'Subtitle / Date (Optional)'}
                 </span>
                 <input
                   type="text"
                   maxLength={44}
                   value={subtitle}
                   onChange={(e) => onSubtitleChange(e.target.value)}
-                  placeholder="No subtitle or date"
+                  placeholder={
+                    isTrainMapMode
+                      ? 'e.g. GOA, KERALA, LADAKH'
+                      : isMapMode
+                      ? 'e.g. GOA'
+                      : 'No subtitle or date'
+                  }
                   className="w-full min-h-[42px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
                 />
               </label>

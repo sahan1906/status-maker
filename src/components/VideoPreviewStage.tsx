@@ -21,6 +21,8 @@ interface VideoPreviewStageProps {
   pace: PaceMode;
   landscapeTilt?: LandscapeTilt;
   transitionOverride?: TransitionChoice;
+  chromaSensitivity?: number;
+  presetOverlayClip?: RenderClip | null;
   watermarkEnabled: boolean;
   watermarkText: string;
   isExporting: boolean;
@@ -38,6 +40,8 @@ export function VideoPreviewStage({
   pace,
   landscapeTilt = 'right',
   transitionOverride = 'auto',
+  chromaSensitivity = 0.55,
+  presetOverlayClip = null,
   watermarkEnabled,
   watermarkText,
   isExporting,
@@ -62,6 +66,8 @@ export function VideoPreviewStage({
     pace,
     landscapeTilt,
     transitionOverride,
+    chromaSensitivity,
+    presetOverlayClip,
     watermarkEnabled,
     watermarkText,
   });
@@ -75,6 +81,8 @@ export function VideoPreviewStage({
     pace,
     landscapeTilt,
     transitionOverride,
+    chromaSensitivity,
+    presetOverlayClip,
     watermarkEnabled,
     watermarkText,
   };
@@ -82,8 +90,9 @@ export function VideoPreviewStage({
   const totalDuration = getTotalDuration(configRef.current);
 
   const pauseAllVideos = (cfg: RenderConfig) => {
-    if (!cfg.clips) return;
-    for (const c of cfg.clips) {
+    const all: RenderClip[] = [...(cfg.clips || [])];
+    if (cfg.presetOverlayClip) all.push(cfg.presetOverlayClip);
+    for (const c of all) {
       if (c.kind === 'video' && isVideoElement(c.source) && !c.source.paused) {
         try {
           c.source.pause();
@@ -95,11 +104,14 @@ export function VideoPreviewStage({
   };
 
   const syncVideosForTime = (t: number, cfg: RenderConfig, shouldPlay: boolean) => {
-    if (!cfg.clips || cfg.clips.length === 0) return;
+    const hasClips = Boolean(cfg.clips && cfg.clips.length > 0);
+    if (!hasClips && !cfg.presetOverlayClip) return;
     const targets = getActiveVideoTargets(t, cfg);
     const activeSet = new Set(targets.map((item) => item.video));
 
-    for (const c of cfg.clips) {
+    const all: RenderClip[] = [...(cfg.clips || [])];
+    if (cfg.presetOverlayClip) all.push(cfg.presetOverlayClip);
+    for (const c of all) {
       if (c.kind === 'video' && isVideoElement(c.source) && !activeSet.has(c.source)) {
         if (!c.source.paused) {
           try {

@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowLeft,
   CheckCircle2,
+  Film,
   Loader2,
   Lock,
   LogOut,
@@ -11,6 +12,8 @@ import {
   Save,
   Send,
   Settings,
+  Trash2,
+  Upload,
   Webhook,
 } from 'lucide-react';
 import {
@@ -49,7 +52,20 @@ interface AdminConsoleProps {
   onConfigUpdated: () => void;
 }
 
-type AdminTab = 'dashboard' | 'settings' | 'broadcast';
+type AdminTab = 'dashboard' | 'overlays' | 'settings' | 'broadcast';
+
+interface AdminOverlayItem {
+  id: string;
+  name: string;
+  tagline: string;
+  badge: string;
+  fit_mode: 'full-frame' | 'detected-rect';
+  chroma_sensitivity: number;
+  accent_color: string;
+  source_type: 'telegram' | 'url';
+  stream_url: string;
+  created_at?: string;
+}
 
 const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
   site_name: 'ReelCraft',
@@ -110,6 +126,21 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
   const stopBroadcastRef = useRef(false);
 
+  // Premade AI Green-Screen Overlay Templates state
+  const [overlays, setOverlays] = useState<AdminOverlayItem[]>([]);
+  const [ovName, setOvName] = useState('');
+  const [ovTagline, setOvTagline] = useState('');
+  const [ovBadge, setOvBadge] = useState('AI Overlay');
+  const [ovFitMode, setOvFitMode] = useState<'full-frame' | 'detected-rect'>('full-frame');
+  const [ovSensitivity, setOvSensitivity] = useState(0.55);
+  const [ovSourceMode, setOvSourceMode] = useState<'upload' | 'url'>('upload');
+  const [ovVideoUrl, setOvVideoUrl] = useState('');
+  const [ovStorageChatId, setOvStorageChatId] = useState('');
+  const [ovFile, setOvFile] = useState<File | null>(null);
+  const [ovSubmitting, setOvSubmitting] = useState(false);
+  const [ovMsg, setOvMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const ovFileInputRef = useRef<HTMLInputElement | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     fetch('/api/admin/auth', { cache: 'no-store' })
@@ -142,9 +173,10 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
     async (bearer: string) => {
       setStatsLoading(true);
       try {
-        const [statsRes, settingsRes] = await Promise.all([
+        const [statsRes, settingsRes, overlaysRes] = await Promise.all([
           fetch('/api/admin/stats', { headers: { Authorization: `Bearer ${bearer}` } }),
           fetch('/api/admin/settings', { headers: { Authorization: `Bearer ${bearer}` } }),
+          fetch('/api/admin/overlays', { headers: { Authorization: `Bearer ${bearer}` } }),
         ]);
 
         if (statsRes.status === 401 || settingsRes.status === 401) {
@@ -160,6 +192,16 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
         if (settingsRes.ok) {
           const cfgData = (await settingsRes.json()) as AdminSettings;
           setSettings(cfgData);
+        }
+        if (overlaysRes.ok) {
+          const ovData = (await overlaysRes.json()) as {
+            overlays?: AdminOverlayItem[];
+            storage_chat_id?: string;
+          };
+          setOverlays(Array.isArray(ovData.overlays) ? ovData.overlays : []);
+          if (ovData.storage_chat_id) {
+            setOvStorageChatId(ovData.storage_chat_id);
+          }
         }
       } finally {
         setStatsLoading(false);
@@ -314,6 +356,90 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
       setCleanAdsTestMsg({ ok: res.ok, text: res.message });
     } finally {
       setTestingCleanAds(null);
+    }
+  };
+
+  const handleCreateOverlay = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setOvMsg(null);
+    if (!ovName.trim()) {
+      setOvMsg({ ok: false, text: 'Enter a template name first (e.g. AI Girl Birthday Wish).' });
+      return;
+    }
+    if (ovSourceMode === 'upload' && !ovFile) {
+      setOvMsg({ ok: false, text: 'Choose a green-screen MP4 video file to upload.' });
+      return;
+    }
+    if (ovSourceMode === 'url' && !ovVideoUrl.trim()) {
+      setOvMsg({ ok: false, text: 'Paste a direct https:// MP4 video URL.' });
+      return;
+    }
+
+    setOvSubmitting(true);
+    try {
+      const form = new FormData();
+      form.append('name', ovName.trim());
+      form.append('tagline', ovTagline.trim());
+      form.append('badge', ovBadge.trim() || 'AI Overlay');
+      form.append('fit_mode', ovFitMode);
+      form.append('chroma_sensitivity', String(ovSensitivity));
+      if (ovSourceMode === 'upload' && ovFile) {
+        form.append('video', ovFile, ovFile.name);
+        if (ovStorageChatId.trim()) {
+          form.append('storage_chat_id', ovStorageChatId.trim());
+        }
+      } else {
+        form.append('video_url', ovVideoUrl.trim());
+      }
+
+      const res = await fetch('/api/admin/overlays', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        overlay?: AdminOverlayItem;
+        error?: string;
+      };
+      if (!res.ok || !data.ok || !data.overlay) {
+        setOvMsg({ ok: false, text: data.error || 'Could not publish AI overlay template.' });
+        return;
+      }
+
+      setOverlays((prev) => [data.overlay!, ...prev]);
+      setOvName('');
+      setOvTagline('');
+      setOvVideoUrl('');
+      setOvFile(null);
+      if (ovFileInputRef.current) ovFileInputRef.current.value = '';
+      setOvMsg({
+        ok: true,
+        text: `"${data.overlay.name}" is now live in the main Templates gallery!`,
+      });
+      onConfigUpdated();
+    } catch {
+      setOvMsg({ ok: false, text: 'Network error while publishing overlay.' });
+    } finally {
+      setOvSubmitting(false);
+    }
+  };
+
+  const handleDeleteOverlay = async (id: string) => {
+    if (!token) return;
+    setOvMsg(null);
+    try {
+      const res = await fetch(`/api/admin/overlays?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setOverlays((prev) => prev.filter((item) => item.id !== id));
+        onConfigUpdated();
+      }
+    } catch {
+      setOvMsg({ ok: false, text: 'Could not delete overlay.' });
     }
   };
 
@@ -484,7 +610,7 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
             ReelCraft Admin
           </span>
 
-          <nav className="flex items-center gap-1 bg-white/[0.04] p-1 rounded-xl border border-white/10">
+          <nav className="flex items-center gap-1 bg-white/[0.04] p-1 rounded-xl border border-white/10 overflow-x-auto no-scrollbar">
             <button
               type="button"
               onClick={() => setActiveTab('dashboard')}
@@ -493,6 +619,15 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
               }`}
             >
               Dashboard
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('overlays')}
+              className={`min-h-[34px] px-3 py-1 text-xs font-semibold rounded-lg whitespace-nowrap transition ${
+                activeTab === 'overlays' ? 'bg-white text-[#08080A]' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              AI Overlays
             </button>
             <button
               type="button"
@@ -1041,6 +1176,258 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
                 </p>
               )}
             </form>
+          </section>
+        )}
+
+        {/* Premade AI Green-Screen Overlay Templates Tab */}
+        {activeTab === 'overlays' && (
+          <section className="space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold text-white">Premade AI Green-Screen Templates</h1>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Upload a premade green-screen video once (e.g. AI girl wishing Happy Birthday). Users simply drop their photo or video behind it!
+              </p>
+            </div>
+
+            <form
+              onSubmit={handleCreateOverlay}
+              className="rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-4"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-zinc-400">Template Name</span>
+                  <input
+                    type="text"
+                    required
+                    maxLength={48}
+                    value={ovName}
+                    onChange={(e) => setOvName(e.target.value)}
+                    placeholder="e.g. AI Girl Birthday Wish"
+                    className="w-full min-h-[44px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                  />
+                </label>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-zinc-400">Badge Label</span>
+                  <input
+                    type="text"
+                    maxLength={20}
+                    value={ovBadge}
+                    onChange={(e) => setOvBadge(e.target.value)}
+                    placeholder="AI Birthday"
+                    className="w-full min-h-[44px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                  />
+                </label>
+              </div>
+
+              <label className="block space-y-1.5">
+                <span className="text-xs font-medium text-zinc-400">Short Description</span>
+                <input
+                  type="text"
+                  maxLength={120}
+                  value={ovTagline}
+                  onChange={(e) => setOvTagline(e.target.value)}
+                  placeholder="AI girl wishes Happy Birthday right in front of your photo"
+                  className="w-full min-h-[44px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                />
+              </label>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-zinc-400">User Photo Placement</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOvFitMode('full-frame')}
+                      className={`min-h-[42px] px-3 rounded-xl border text-xs font-semibold transition ${
+                        ovFitMode === 'full-frame'
+                          ? 'bg-white text-[#08080A] border-white'
+                          : 'bg-[#08080A] text-zinc-300 border-white/10 hover:border-white/25'
+                      }`}
+                    >
+                      Full Background
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOvFitMode('detected-rect')}
+                      className={`min-h-[42px] px-3 rounded-xl border text-xs font-semibold transition ${
+                        ovFitMode === 'detected-rect'
+                          ? 'bg-white text-[#08080A] border-white'
+                          : 'bg-[#08080A] text-zinc-300 border-white/10 hover:border-white/25'
+                      }`}
+                    >
+                      Inside Green Box
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-zinc-500">
+                    Use Full Background for an AI person on green screen; Inside Green Box for a phone/frame.
+                  </p>
+                </div>
+
+                <label className="block space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-400 font-medium">Default Chroma Key Sensitivity</span>
+                    <span className="font-mono text-white">{Math.round(ovSensitivity * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.15}
+                    max={0.95}
+                    step={0.02}
+                    value={ovSensitivity}
+                    onChange={(e) => setOvSensitivity(Number(e.target.value))}
+                    className="w-full accent-emerald-400 h-1.5 mt-3 cursor-pointer"
+                  />
+                </label>
+              </div>
+
+              {/* Video Source Toggle: Free Telegram MP4 Upload OR Direct MP4 URL */}
+              <div className="pt-3 border-t border-white/10 space-y-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOvSourceMode('upload')}
+                    className={`min-h-[36px] px-3.5 rounded-xl text-xs font-semibold border transition ${
+                      ovSourceMode === 'upload'
+                        ? 'bg-emerald-400 text-[#05140B] border-emerald-400'
+                        : 'bg-[#08080A] text-zinc-300 border-white/10'
+                    }`}
+                  >
+                    Upload MP4 (Free via Bot)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOvSourceMode('url')}
+                    className={`min-h-[36px] px-3.5 rounded-xl text-xs font-semibold border transition ${
+                      ovSourceMode === 'url'
+                        ? 'bg-white text-[#08080A] border-white'
+                        : 'bg-[#08080A] text-zinc-300 border-white/10'
+                    }`}
+                  >
+                    Direct HTTPS MP4 URL
+                  </button>
+                </div>
+
+                {ovSourceMode === 'upload' ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label className="block space-y-1.5">
+                      <span className="text-xs font-medium text-zinc-400">
+                        Green-Screen MP4 File (max 19 MB)
+                      </span>
+                      <input
+                        ref={ovFileInputRef}
+                        type="file"
+                        accept="video/mp4,video/*"
+                        onChange={(e) => setOvFile(e.target.files?.[0] || null)}
+                        className="w-full text-xs text-zinc-300 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-white file:text-[#08080A] hover:file:bg-zinc-200 cursor-pointer"
+                      />
+                    </label>
+
+                    <label className="block space-y-1.5">
+                      <span className="text-xs font-medium text-zinc-400">
+                        Your Telegram Chat ID (optional if bot has users)
+                      </span>
+                      <input
+                        type="text"
+                        value={ovStorageChatId}
+                        onChange={(e) => setOvStorageChatId(e.target.value)}
+                        placeholder="e.g. 123456789 or -100..."
+                        className="w-full min-h-[42px] px-3.5 text-sm font-mono rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-zinc-400">Direct MP4 Video URL</span>
+                    <input
+                      type="url"
+                      value={ovVideoUrl}
+                      onChange={(e) => setOvVideoUrl(e.target.value)}
+                      placeholder="https://example.com/ai-girl-birthday-greenscreen.mp4"
+                      className="w-full min-h-[44px] px-3.5 text-sm font-mono rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                    />
+                  </label>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={ovSubmitting}
+                className="min-h-[46px] px-5 py-2.5 text-sm font-semibold rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 disabled:opacity-45 flex items-center gap-2 transition"
+              >
+                {ovSubmitting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                <span>{ovSubmitting ? 'Publishing Template...' : 'Publish AI Overlay Template'}</span>
+              </button>
+
+              {ovMsg && (
+                <p
+                  className={`text-xs rounded-xl px-3 py-2 border ${
+                    ovMsg.ok
+                      ? 'text-emerald-200 bg-emerald-500/10 border-emerald-500/25'
+                      : 'text-red-300 bg-red-500/10 border-red-500/20'
+                  }`}
+                >
+                  {ovMsg.text}
+                </p>
+              )}
+            </form>
+
+            {/* Published Premade AI Overlays List */}
+            <div className="rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-white">
+                  Published AI Overlays ({overlays.length})
+                </h2>
+              </div>
+
+              {overlays.length === 0 ? (
+                <p className="text-xs text-zinc-500 py-4 text-center">
+                  No premade AI overlays published yet. Upload your first green-screen video above!
+                </p>
+              ) : (
+                <div className="space-y-2.5">
+                  {overlays.map((ov) => (
+                    <div
+                      key={ov.id}
+                      className="flex items-center justify-between gap-3 rounded-xl bg-[#08080A] border border-white/10 p-3"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-11 w-11 rounded-lg bg-pink-500/15 border border-pink-400/30 flex items-center justify-center text-pink-300 shrink-0">
+                          <Film className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-white truncate">
+                              {ov.name}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-zinc-300 shrink-0">
+                              {ov.fit_mode === 'full-frame' ? 'Full BG' : 'Green Box'}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 shrink-0">
+                              {ov.source_type === 'telegram' ? 'Bot Hosted' : 'URL'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-400 truncate mt-0.5">{ov.tagline}</p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteOverlay(ov.id)}
+                        aria-label={`Delete ${ov.name}`}
+                        className="min-h-[38px] min-w-[38px] rounded-lg bg-red-500/10 border border-red-500/25 text-red-300 hover:bg-red-500/20 flex items-center justify-center shrink-0 transition"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </section>
         )}
       </main>

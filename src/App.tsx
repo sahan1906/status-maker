@@ -10,6 +10,7 @@ import {
   LandscapeTilt,
   PaceMode,
   ReelTemplate,
+  SAMPLE_MEDIA,
   TemplateCategory,
   TransitionChoice,
 } from './data/templates';
@@ -75,7 +76,7 @@ export default function App() {
 
   // Clean 2-view workflow: Templates & Media Editor (starts Blank by default)
   const [view, setView] = useState<StudioView>('templates');
-  const [activeCategory, setActiveCategory] = useState<TemplateCategory>('travel');
+  const [activeCategory, setActiveCategory] = useState<TemplateCategory>('all');
   const [selectedTemplate, setSelectedTemplate] = useState<ReelTemplate>(BLANK_TEMPLATE);
 
   const [photos, setPhotos] = useState<GalleryPhoto[]>(() =>
@@ -94,6 +95,10 @@ export default function App() {
   const [pace, setPace] = useState<PaceMode>('normal');
   const [landscapeTilt, setLandscapeTilt] = useState<LandscapeTilt>('right');
   const [transitionChoice, setTransitionChoice] = useState<TransitionChoice>('auto');
+  const [chromaSensitivity, setChromaSensitivity] = useState<number>(0.55);
+  const [customTemplates, setCustomTemplates] = useState<ReelTemplate[]>([]);
+  const [presetOverlayClip, setPresetOverlayClip] = useState<RenderClip | null>(null);
+  const presetVideoCacheRef = useRef<Map<string, RenderClip>>(new Map());
 
   // Download Video Sheet state
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
@@ -122,8 +127,57 @@ export default function App() {
   const downloadCopyCountRef = useRef(0);
 
   const refreshConfig = useCallback(async () => {
-    const cfg = await fetchPublicAppConfig();
+    const [cfg, overlaysRes] = await Promise.all([
+      fetchPublicAppConfig(),
+      fetch('/api/overlays', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : { overlays: [] }))
+        .catch(() => ({ overlays: [] })),
+    ]);
     setAppConfig(cfg);
+
+    const list = Array.isArray((overlaysRes as { overlays?: unknown[] }).overlays)
+      ? ((overlaysRes as {
+          overlays: {
+            id: string;
+            name: string;
+            tagline?: string;
+            badge?: string;
+            fit_mode?: string;
+            chroma_sensitivity?: number;
+            accent_color?: string;
+            default_title?: string;
+            stream_url: string;
+          }[];
+        }).overlays)
+      : [];
+
+    setCustomTemplates(
+      list.map((ov) => ({
+        id: `ov-${ov.id}`,
+        name: ov.name,
+        category: 'fx',
+        tagline:
+          ov.tagline ||
+          'Premade green-screen AI video — just upload your photo or video as background',
+        badge: ov.badge || 'AI Overlay',
+        defaultTitle: ov.default_title || '',
+        defaultSubtitle: '',
+        paceMultiplier: 0.85,
+        motionStyle: 'none',
+        specialMode: 'chroma-green-screen',
+        presetOverlayUrl: ov.stream_url,
+        chromaFitMode: ov.fit_mode === 'detected-rect' ? 'detected-rect' : 'full-frame',
+        defaultChromaSensitivity:
+          typeof ov.chroma_sensitivity === 'number' ? ov.chroma_sensitivity : 0.55,
+        isCustomOverlay: true,
+        transition: 'dissolve',
+        layout: 'full',
+        grade: 'none',
+        overlay: 'none',
+        accentColor: ov.accent_color || '#F472B6',
+        samplePhotos: [SAMPLE_MEDIA.birthdaySparkler, SAMPLE_MEDIA.travelCoast, SAMPLE_MEDIA.vibesCafe],
+      }))
+    );
   }, []);
 
   useEffect(() => {
@@ -272,6 +326,59 @@ export default function App() {
 
   const hasOpenedEditorRef = useRef(false);
 
+  // Automatically decode & cache the locked foreground green-screen video for Premade AI Overlay templates
+  useEffect(() => {
+    const url = selectedTemplate.presetOverlayUrl;
+    if (!url) {
+      setPresetOverlayClip(null);
+      return;
+    }
+
+    const cached = presetVideoCacheRef.current.get(url);
+    if (cached) {
+      setPresetOverlayClip(cached);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingMedia(true);
+    createClipVideoElement(url, 0)
+      .then((videoEl) => {
+        if (cancelled) {
+          videoEl.pause();
+          videoEl.removeAttribute('src');
+          videoEl.load();
+          return;
+        }
+        const dur =
+          Number.isFinite(videoEl.duration) && videoEl.duration > 0.3
+            ? Number(videoEl.duration.toFixed(2))
+            : 6.0;
+        const clip: RenderClip = {
+          id: `preset-${selectedTemplate.id}`,
+          kind: 'video',
+          source: videoEl,
+          trimStart: 0,
+          trimEnd: dur,
+        };
+        presetVideoCacheRef.current.set(url, clip);
+        setPresetOverlayClip(clip);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPresetOverlayClip(null);
+          setMediaError('Could not load the premade overlay video. Check its URL or Telegram Bot setting.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingMedia(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTemplate.id, selectedTemplate.presetOverlayUrl]);
+
   const handleSelectTemplate = (tpl: ReelTemplate, openEditor = false) => {
     haptic('light');
     const isSwitchingProject =
@@ -280,6 +387,11 @@ export default function App() {
     setTitle(tpl.defaultTitle);
     setSubtitle(tpl.defaultSubtitle);
     setTransitionChoice('auto');
+    if (typeof tpl.defaultChromaSensitivity === 'number') {
+      setChromaSensitivity(tpl.defaultChromaSensitivity);
+    } else if (tpl.specialMode === 'chroma-green-screen') {
+      setChromaSensitivity(0.55);
+    }
     setPhotos((prev) => (prev.every((p) => p.isSample) ? makeSampleGallery(tpl) : prev));
     setExportedVideo(null);
     setTelegramSendStatus(null);
@@ -312,11 +424,64 @@ export default function App() {
 
     setPhotos((prev) => {
       const onlySamples = prev.every((p) => p.isSample);
-      const base = onlySamples ? [] : prev;
-      return [...base, ...incoming].slice(0, 50);
+      if (onlySamples) {
+        return incoming.slice(0, 50);
+      }
+      // In Green Screen mode (without a locked preset overlay), keep the user's green-screen foreground video while replacing sample placeholders
+      if (selectedTemplate.specialMode === 'chroma-green-screen' && !selectedTemplate.presetOverlayUrl) {
+        const cleaned = prev.filter((p) => !p.isSample);
+        return [...cleaned, ...incoming].slice(0, 50);
+      }
+      return [...prev, ...incoming].slice(0, 50);
     });
     setExportedVideo(null);
     setTelegramSendStatus(null);
+  };
+
+  const handleSetGreenScreenVideo = async (files: FileList) => {
+    haptic('light');
+    setMediaError(null);
+    const validFile = Array.from(files).find(
+      (f) => f.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|3gp)$/i.test(f.name)
+    );
+    if (!validFile) return;
+
+    setIsLoadingMedia(true);
+    try {
+      const asset = await loadVideoAsset(validFile);
+      const id = `green-fg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const fgItem: GalleryPhoto = {
+        id,
+        kind: 'video',
+        previewUrl: asset.posterUrl,
+        videoUrl: asset.videoUrl,
+        name: validFile.name,
+        isSample: false,
+        sourceDuration: asset.duration,
+        trimStart: 0,
+        trimEnd: asset.duration,
+      };
+
+      setPhotos((prev) => {
+        const existingFgIdx = prev.findIndex((p) => p.kind === 'video');
+        if (existingFgIdx >= 0) {
+          const oldFg = prev[existingFgIdx];
+          const rest = prev.filter((_, idx) => idx !== existingFgIdx);
+          if (oldFg.videoUrl && !rest.some((item) => item.videoUrl === oldFg.videoUrl)) {
+            URL.revokeObjectURL(oldFg.videoUrl);
+          }
+          return [fgItem, ...rest].slice(0, 50);
+        }
+        // Keep sample photos right behind the uploaded green-screen video so user immediately sees live photos inside their green screen!
+        return [fgItem, ...prev].slice(0, 50);
+      });
+      setExportedVideo(null);
+      setTelegramSendStatus(null);
+    } catch {
+      setMediaError(`Could not open "${validFile.name}". Try an MP4 or MOV video.`);
+    } finally {
+      setIsLoadingMedia(false);
+    }
   };
 
   const handleAddVideos = async (files: FileList) => {
@@ -354,6 +519,14 @@ export default function App() {
       if (incoming.length > 0) {
         setPhotos((prev) => {
           const onlySamples = prev.every((p) => p.isSample);
+          if (selectedTemplate.specialMode === 'chroma-green-screen' && !selectedTemplate.presetOverlayUrl) {
+            if (onlySamples) {
+              // First video added on Green Screen mode becomes foreground; keep sample photos behind it for instant live preview!
+              return [...incoming, ...prev].slice(0, 50);
+            }
+            const cleaned = prev.filter((p) => !p.isSample);
+            return [...cleaned, ...incoming].slice(0, 50);
+          }
           const base = onlySamples ? [] : prev;
           return [...base, ...incoming].slice(0, 50);
         });
@@ -458,8 +631,32 @@ export default function App() {
 
   const handleScrubClipTime = (clipId: string, sourceTimeSec: number) => {
     const slideDur = getSlideDuration(selectedTemplate, pace);
+    const specialMode = selectedTemplate.specialMode ?? 'none';
+
+    if (specialMode === 'chroma-green-screen') {
+      const fgVideo = photos.find((p) => p.kind === 'video');
+      if (fgVideo && fgVideo.id === clipId) {
+        const start = fgVideo.trimStart ?? 0;
+        const end = fgVideo.trimEnd ?? fgVideo.sourceDuration ?? 3;
+        const clampedOffset = Math.max(0, Math.min(sourceTimeSec - start, Math.max(0.05, end - start - 0.02)));
+        scrubNonceRef.current += 1;
+        setScrubRequest({ timeSec: clampedOffset, nonce: scrubNonceRef.current });
+        return;
+      }
+    }
+
     const introDur =
-      selectedTemplate.overlay === 'kinetic-intro' && (title.trim() || subtitle.trim()) ? 1.0 : 0;
+      specialMode === 'india-train-map'
+        ? 3.55
+        : specialMode === 'map-route-zoom'
+        ? 3.35
+        : specialMode === 'marvel-intro' || specialMode === 'text-portal'
+        ? title.trim()
+          ? 3.15
+          : 0
+        : selectedTemplate.overlay === 'kinetic-intro' && (title.trim() || subtitle.trim())
+        ? 1.0
+        : 0;
     let cursor = introDur;
 
     for (const item of photos) {
@@ -558,6 +755,8 @@ export default function App() {
           pace,
           landscapeTilt,
           transitionOverride: transitionChoice,
+          chromaSensitivity,
+          presetOverlayClip,
           watermarkEnabled: appConfig.watermark_enabled,
           watermarkText: appConfig.watermark_text,
         },
@@ -933,6 +1132,7 @@ export default function App() {
               <TemplateGallery
                 selectedTemplate={selectedTemplate}
                 activeCategory={activeCategory}
+                customTemplates={customTemplates}
                 watermarkEnabled={appConfig.watermark_enabled}
                 watermarkText={appConfig.watermark_text}
                 onCategoryChange={(cat) => {
@@ -970,6 +1170,8 @@ export default function App() {
                   pace={pace}
                   landscapeTilt={landscapeTilt}
                   transitionOverride={transitionChoice}
+                  chromaSensitivity={chromaSensitivity}
+                  presetOverlayClip={presetOverlayClip}
                   watermarkEnabled={appConfig.watermark_enabled}
                   watermarkText={appConfig.watermark_text}
                   isExporting={isExporting}
@@ -995,6 +1197,8 @@ export default function App() {
               pace={pace}
               landscapeTilt={landscapeTilt}
               transitionOverride={transitionChoice}
+              chromaSensitivity={chromaSensitivity}
+              presetOverlayClip={presetOverlayClip}
               watermarkEnabled={appConfig.watermark_enabled}
               watermarkText={appConfig.watermark_text}
               isExporting={isExporting}
@@ -1031,10 +1235,12 @@ export default function App() {
               pace={pace}
               landscapeTilt={landscapeTilt}
               transitionChoice={transitionChoice}
+              chromaSensitivity={chromaSensitivity}
               isLoadingMedia={isLoadingMedia}
               mediaError={mediaError}
               onAddPhotos={handleAddPhotos}
               onAddVideos={handleAddVideos}
+              onSetGreenScreenVideo={handleSetGreenScreenVideo}
               onRemovePhoto={handleRemovePhoto}
               onMovePhoto={handleMovePhoto}
               onTrimClip={handleTrimClip}
@@ -1062,6 +1268,10 @@ export default function App() {
               onTransitionChange={(choice) => {
                 haptic('light');
                 setTransitionChoice(choice);
+                setExportedVideo(null);
+              }}
+              onChromaSensitivityChange={(val) => {
+                setChromaSensitivity(val);
                 setExportedVideo(null);
               }}
             />
