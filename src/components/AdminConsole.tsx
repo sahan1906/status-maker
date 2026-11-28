@@ -2,18 +2,24 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   ArrowLeft,
+  Check,
   CheckCircle2,
   Copy,
   ExternalLink,
   Film,
+  KeyRound,
+  Link2,
   Loader2,
   Lock,
   LogOut,
+  Plus,
   Radio,
   RefreshCw,
   Save,
   Send,
   Settings,
+  ShieldCheck,
+  ShieldOff,
   Trash2,
   Upload,
   Webhook,
@@ -61,7 +67,42 @@ interface AdminConsoleProps {
   onConfigUpdated: () => void;
 }
 
-type AdminTab = 'dashboard' | 'shorts' | 'overlays' | 'settings' | 'broadcast';
+type AdminTab = 'dashboard' | 'shorts' | 'taplinks' | 'overlays' | 'settings' | 'broadcast';
+
+interface AdminTapLinkStats {
+  totalLinks: number;
+  totalClicks: number;
+  totalUnlocks: number;
+  activeKeys: number;
+}
+
+interface AdminTapLinkKeyItem {
+  id: string;
+  name: string;
+  contact_note: string;
+  key_prefix: string;
+  status: 'active' | 'revoked';
+  daily_limit: number;
+  links_created: number;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+interface AdminTapLinkItem {
+  id: string;
+  code: string;
+  title: string;
+  destination_url: string;
+  destination_host: string;
+  creator_type: string;
+  creator_label: string;
+  clicks: number;
+  unlocks: number;
+  short_url: string;
+  telegram_url: string;
+  web_url: string;
+  created_at: string;
+}
 
 interface AdminShortItem {
   id: string;
@@ -177,6 +218,23 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
   const [shortMsg, setShortMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const shortFileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // TapLinks & Verified Developer API state
+  const [tapLinkStats, setTapLinkStats] = useState<AdminTapLinkStats>({
+    totalLinks: 0,
+    totalClicks: 0,
+    totalUnlocks: 0,
+    activeKeys: 0,
+  });
+  const [tapLinkKeys, setTapLinkKeys] = useState<AdminTapLinkKeyItem[]>([]);
+  const [tapLinkRecent, setTapLinkRecent] = useState<AdminTapLinkItem[]>([]);
+  const [tlPartnerName, setTlPartnerName] = useState('');
+  const [tlPartnerContact, setTlPartnerContact] = useState('');
+  const [tlDailyLimit, setTlDailyLimit] = useState('500');
+  const [tlCreatingKey, setTlCreatingKey] = useState(false);
+  const [tlIssuedKey, setTlIssuedKey] = useState<{ name: string; plainKey: string } | null>(null);
+  const [tlMsg, setTlMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [copiedTlId, setCopiedTlId] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     fetch('/api/admin/auth', { cache: 'no-store' })
@@ -209,11 +267,12 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
     async (bearer: string) => {
       setStatsLoading(true);
       try {
-        const [statsRes, settingsRes, overlaysRes, shortsRes] = await Promise.all([
+        const [statsRes, settingsRes, overlaysRes, shortsRes, tapLinksRes] = await Promise.all([
           fetch('/api/admin/stats', { headers: { Authorization: `Bearer ${bearer}` } }),
           fetch('/api/admin/settings', { headers: { Authorization: `Bearer ${bearer}` } }),
           fetch('/api/admin/overlays', { headers: { Authorization: `Bearer ${bearer}` } }),
           fetch('/api/admin/shorts', { headers: { Authorization: `Bearer ${bearer}` } }),
+          fetch('/api/admin/taplinks', { headers: { Authorization: `Bearer ${bearer}` } }),
         ]);
 
         if (statsRes.status === 401 || settingsRes.status === 401) {
@@ -243,6 +302,16 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
         if (shortsRes.ok) {
           const shData = (await shortsRes.json()) as { videos?: AdminShortItem[] };
           setAdminShorts(Array.isArray(shData.videos) ? shData.videos : []);
+        }
+        if (tapLinksRes.ok) {
+          const tlData = (await tapLinksRes.json()) as {
+            stats?: AdminTapLinkStats;
+            apiKeys?: AdminTapLinkKeyItem[];
+            recentLinks?: AdminTapLinkItem[];
+          };
+          if (tlData.stats) setTapLinkStats(tlData.stats);
+          if (Array.isArray(tlData.apiKeys)) setTapLinkKeys(tlData.apiKeys);
+          if (Array.isArray(tlData.recentLinks)) setTapLinkRecent(tlData.recentLinks);
         }
       } finally {
         setStatsLoading(false);
@@ -609,6 +678,126 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
     }
   };
 
+  const copyTapLinkAdminText = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedTlId(id);
+      window.setTimeout(() => {
+        setCopiedTlId((curr) => (curr === id ? null : curr));
+      }, 1800);
+    } catch {
+      // Ignore clipboard restrictions
+    }
+  };
+
+  const handleIssueTapLinkKey = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setTlMsg(null);
+    if (!tlPartnerName.trim()) {
+      setTlMsg({ ok: false, text: 'Enter the verified developer or partner name first.' });
+      return;
+    }
+
+    setTlCreatingKey(true);
+    try {
+      const res = await fetch('/api/admin/taplinks', {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify({
+          name: tlPartnerName.trim(),
+          contact_note: tlPartnerContact.trim(),
+          daily_limit: Number.parseInt(tlDailyLimit, 10) || 500,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        plain_key?: string;
+        apiKey?: AdminTapLinkKeyItem;
+        error?: string;
+      };
+      if (!res.ok || !data.ok || !data.plain_key || !data.apiKey) {
+        setTlMsg({ ok: false, text: data.error || 'Could not issue Developer API key.' });
+        return;
+      }
+
+      setTlIssuedKey({ name: data.apiKey.name, plainKey: data.plain_key });
+      setTapLinkKeys((prev) => [data.apiKey!, ...prev]);
+      setTapLinkStats((prev) => ({ ...prev, activeKeys: prev.activeKeys + 1 }));
+      setTlPartnerName('');
+      setTlPartnerContact('');
+      setTlDailyLimit('500');
+      setTlMsg({
+        ok: true,
+        text: `Verified API key generated for ${data.apiKey.name}. Copy it now — it is stored as a one-way hash and cannot be viewed again.`,
+      });
+    } catch {
+      setTlMsg({ ok: false, text: 'Network error while generating API key.' });
+    } finally {
+      setTlCreatingKey(false);
+    }
+  };
+
+  const handleToggleTapLinkKeyStatus = async (item: AdminTapLinkKeyItem) => {
+    if (!token) return;
+    const nextStatus = item.status === 'active' ? 'revoked' : 'active';
+    try {
+      const res = await fetch('/api/admin/taplinks', {
+        method: 'PATCH',
+        headers: authHeaders(token),
+        body: JSON.stringify({ id: item.id, status: nextStatus }),
+      });
+      if (res.ok) {
+        setTapLinkKeys((prev) =>
+          prev.map((k) => (k.id === item.id ? { ...k, status: nextStatus } : k))
+        );
+        setTapLinkStats((prev) => ({
+          ...prev,
+          activeKeys: Math.max(0, prev.activeKeys + (nextStatus === 'active' ? 1 : -1)),
+        }));
+      }
+    } catch {
+      // Ignore network error
+    }
+  };
+
+  const handleDeleteTapLinkKey = async (item: AdminTapLinkKeyItem) => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/admin/taplinks?type=key&id=${encodeURIComponent(item.id)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setTapLinkKeys((prev) => prev.filter((k) => k.id !== item.id));
+        if (item.status === 'active') {
+          setTapLinkStats((prev) => ({ ...prev, activeKeys: Math.max(0, prev.activeKeys - 1) }));
+        }
+      }
+    } catch {
+      // Ignore network error
+    }
+  };
+
+  const handleDeleteTapLinkItem = async (item: AdminTapLinkItem) => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/admin/taplinks?type=link&id=${encodeURIComponent(item.id)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setTapLinkRecent((prev) => prev.filter((row) => row.id !== item.id));
+        setTapLinkStats((prev) => ({
+          ...prev,
+          totalLinks: Math.max(0, prev.totalLinks - 1),
+        }));
+      }
+    } catch {
+      // Ignore network error
+    }
+  };
+
   if (authStatusLoading) {
     return (
       <div className="min-h-screen bg-[#08080A] text-zinc-100 flex items-center justify-center p-6">
@@ -730,6 +919,15 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
               }`}
             >
               Edits ({adminShorts.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('taplinks')}
+              className={`min-h-[34px] px-3 py-1 text-xs font-semibold rounded-lg whitespace-nowrap transition ${
+                activeTab === 'taplinks' ? 'bg-white text-[#08080A]' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              TapLinks ({tapLinkKeys.filter((k) => k.status === 'active').length})
             </button>
             <button
               type="button"
@@ -1898,6 +2096,387 @@ export function AdminConsole({ onExitToApp, onConfigUpdated }: AdminConsoleProps
             </div>
           </section>
         )}
+
+        {/* TapLinks & Verified Developer API Tab */}
+        {activeTab === 'taplinks' && (() => {
+          const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-domain.pages.dev';
+          const singleCurl = `curl -X POST "${origin}/api/v1/taplinks/shorten" \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"url":"https://example.com/offer","title":"Special Pack","alias":"my-pack"}'`;
+          const bulkCurl = `curl -X POST "${origin}/api/v1/taplinks/bulk" \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"links":[{"url":"https://example.com/1","title":"Link 1"},{"url":"https://example.com/2","title":"Link 2"}]}'`;
+          const listCurl = `curl "${origin}/api/v1/taplinks?limit=50" \\\n  -H "Authorization: Bearer YOUR_API_KEY"`;
+
+          return (
+            <section className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+                    <Link2 className="w-5 h-5 text-amber-400" />
+                    <span>TapLinks &amp; Developer API</span>
+                  </h1>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Personally verify partners and issue API keys for bulk link shortening or Mini App integration.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadDashboardData(token)}
+                  disabled={statsLoading}
+                  className="min-h-[42px] px-3.5 py-2 text-xs font-medium rounded-xl bg-white/[0.06] border border-white/10 text-zinc-200 hover:text-white flex items-center gap-1.5 transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${statsLoading ? 'animate-spin' : ''}`} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+
+              {/* 4-column KPI strip */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="rounded-2xl bg-[#111114] border border-white/10 p-4">
+                  <p className="text-xs text-zinc-400">Total TapLinks</p>
+                  <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-white">
+                    {tapLinkStats.totalLinks.toLocaleString()}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-[#111114] border border-white/10 p-4">
+                  <p className="text-xs text-zinc-400">Total Visits</p>
+                  <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-white">
+                    {tapLinkStats.totalClicks.toLocaleString()}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-[#111114] border border-white/10 p-4">
+                  <p className="text-xs text-zinc-400">Verified Ad Unlocks</p>
+                  <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-amber-400">
+                    {tapLinkStats.totalUnlocks.toLocaleString()}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-[#111114] border border-white/10 p-4">
+                  <p className="text-xs text-zinc-400">Active API Keys</p>
+                  <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-emerald-400">
+                    {tapLinkStats.activeKeys.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              {/* Issue Verified Developer API Key */}
+              <form
+                onSubmit={handleIssueTapLinkKey}
+                className="rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-4"
+              >
+                <div>
+                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-amber-400" />
+                    <span>Issue Verified Developer API Key</span>
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Create a private key only after verifying the developer or Mini App owner. Keys are hashed (SHA-256) in D1.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-zinc-400">Partner / Mini App Name</span>
+                    <input
+                      type="text"
+                      required
+                      maxLength={80}
+                      value={tlPartnerName}
+                      onChange={(e) => setTlPartnerName(e.target.value)}
+                      placeholder="e.g. ViralTools MiniApp"
+                      className="w-full min-h-[44px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                    />
+                  </label>
+
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-zinc-400">Contact / Telegram Handle</span>
+                    <input
+                      type="text"
+                      maxLength={140}
+                      value={tlPartnerContact}
+                      onChange={(e) => setTlPartnerContact(e.target.value)}
+                      placeholder="e.g. @partner_dev"
+                      className="w-full min-h-[44px] px-3.5 text-sm rounded-xl bg-[#08080A] border border-white/10 text-white placeholder:text-zinc-600 focus:outline-none focus:border-white/40"
+                    />
+                  </label>
+
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-zinc-400">Daily Quota (links / 24h)</span>
+                    <input
+                      type="number"
+                      min={10}
+                      max={50000}
+                      value={tlDailyLimit}
+                      onChange={(e) => setTlDailyLimit(e.target.value)}
+                      className="w-full min-h-[44px] px-3.5 text-sm font-mono rounded-xl bg-[#08080A] border border-white/10 text-white focus:outline-none focus:border-white/40"
+                    />
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={tlCreatingKey}
+                  className="min-h-[44px] px-5 py-2 text-xs font-semibold rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 disabled:opacity-50 flex items-center gap-2 transition"
+                >
+                  {tlCreatingKey ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Plus className="w-4 h-4" />
+                  )}
+                  <span>{tlCreatingKey ? 'Generating...' : 'Generate Verified API Key'}</span>
+                </button>
+
+                {tlMsg && (
+                  <p
+                    className={`text-xs rounded-xl px-3.5 py-2.5 border ${
+                      tlMsg.ok
+                        ? 'text-emerald-200 bg-emerald-500/10 border-emerald-500/25'
+                        : 'text-red-200 bg-red-500/10 border-red-500/25'
+                    }`}
+                  >
+                    {tlMsg.text}
+                  </p>
+                )}
+
+                {tlIssuedKey && (
+                  <div className="rounded-xl bg-[#08080A] border border-amber-400/40 p-4 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-amber-300">
+                        One-Time API Key for {tlIssuedKey.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyTapLinkAdminText(tlIssuedKey.plainKey, 'issued-plain-key')}
+                        className="min-h-[34px] px-3 text-xs font-semibold rounded-lg bg-white text-[#08080A] hover:bg-zinc-200 flex items-center gap-1.5 transition"
+                      >
+                        {copiedTlId === 'issued-plain-key' ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Copied Key</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Key</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <code className="block text-xs font-mono text-white break-all select-all bg-white/[0.04] rounded-lg px-3 py-2">
+                      {tlIssuedKey.plainKey}
+                    </code>
+                    <p className="text-[11px] text-zinc-400">
+                      Send this key privately to the verified developer. Once you refresh or leave this page, the full key cannot be recovered.
+                    </p>
+                  </div>
+                )}
+              </form>
+
+              {/* Verified Developer Keys List */}
+              <div className="rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-3">
+                <h2 className="text-sm font-semibold text-white">
+                  Verified Developer Keys ({tapLinkKeys.length})
+                </h2>
+
+                {tapLinkKeys.length === 0 ? (
+                  <p className="text-xs text-zinc-500 py-4 text-center">
+                    No Developer API keys issued yet.
+                  </p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {tapLinkKeys.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-xl bg-[#08080A] border border-white/10 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-white">{item.name}</span>
+                            <span
+                              className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-md border ${
+                                item.status === 'active'
+                                  ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+                                  : 'bg-red-500/10 border-red-500/25 text-red-300'
+                              }`}
+                            >
+                              {item.status === 'active' ? (
+                                <ShieldCheck className="w-3 h-3" />
+                              ) : (
+                                <ShieldOff className="w-3 h-3" />
+                              )}
+                              <span>{item.status === 'active' ? 'Active' : 'Suspended'}</span>
+                            </span>
+                            {item.contact_note && (
+                              <span className="text-xs text-zinc-400">{item.contact_note}</span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500 font-mono tabular-nums">
+                            <span>{item.key_prefix}</span>
+                            <span>
+                              Created: <strong className="text-zinc-300">{item.links_created}</strong>
+                            </span>
+                            <span>
+                              Limit: <strong className="text-zinc-300">{item.daily_limit}/24h</strong>
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleTapLinkKeyStatus(item)}
+                            className="min-h-[36px] px-3 text-xs font-semibold rounded-lg bg-white/[0.06] border border-white/10 text-zinc-200 hover:text-white transition"
+                          >
+                            {item.status === 'active' ? 'Suspend' : 'Reactivate'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTapLinkKey(item)}
+                            aria-label={`Delete API key for ${item.name}`}
+                            className="min-h-[36px] min-w-[36px] rounded-lg bg-red-500/10 border border-red-500/25 text-red-300 hover:bg-red-500/20 flex items-center justify-center transition"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Developer API Quick Docs (Ready to share with verified partners) */}
+              <div className="rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-white">
+                    Developer API Quick Docs
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Share these endpoints with verified developers. Authenticate via{' '}
+                    <code className="font-mono text-zinc-300">Authorization: Bearer tl_live_...</code> or{' '}
+                    <code className="font-mono text-zinc-300">X-API-Key</code>.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  {[
+                    {
+                      id: 'doc-single',
+                      label: '1. Single Shorten — POST /api/v1/taplinks/shorten',
+                      code: singleCurl,
+                    },
+                    {
+                      id: 'doc-bulk',
+                      label: '2. Bulk Shorten (up to 50 URLs) — POST /api/v1/taplinks/bulk',
+                      code: bulkCurl,
+                    },
+                    {
+                      id: 'doc-list',
+                      label: '3. List Own Links & Stats — GET /api/v1/taplinks',
+                      code: listCurl,
+                    },
+                  ].map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="rounded-xl bg-[#08080A] border border-white/10 p-3.5 space-y-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-zinc-300">{doc.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => copyTapLinkAdminText(doc.code, doc.id)}
+                          className="min-h-[30px] px-2.5 text-[11px] font-semibold rounded-lg bg-white/[0.08] text-zinc-200 hover:text-white flex items-center gap-1 transition"
+                        >
+                          {copiedTlId === doc.id ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span>Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      <pre className="text-[11px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap break-all">
+                        {doc.code}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Recent TapLinks Moderation */}
+              <div className="rounded-2xl bg-[#111114] border border-white/10 p-5 space-y-3">
+                <h2 className="text-sm font-semibold text-white">
+                  Recent TapLinks ({tapLinkRecent.length})
+                </h2>
+
+                {tapLinkRecent.length === 0 ? (
+                  <p className="text-xs text-zinc-500 py-4 text-center">
+                    No TapLinks created yet.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {tapLinkRecent.map((row) => (
+                      <div
+                        key={row.id}
+                        className="rounded-xl bg-[#08080A] border border-white/10 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-xs font-semibold text-white truncate">
+                              {row.title}
+                            </span>
+                            <span className="text-[11px] font-mono text-amber-400 shrink-0">
+                              /{row.code}
+                            </span>
+                            <span className="text-[11px] text-zinc-500 shrink-0">
+                              · {row.creator_label}
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-mono text-zinc-400 truncate">
+                            {row.destination_host}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                          <div className="flex items-center gap-3 text-xs font-mono tabular-nums text-zinc-400">
+                            <span>
+                              Visits: <strong className="text-white">{row.clicks}</strong>
+                            </span>
+                            <span>
+                              Unlocks: <strong className="text-amber-400">{row.unlocks}</strong>
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyTapLinkAdminText(row.telegram_url || row.web_url, `link-${row.id}`)
+                            }
+                            aria-label={`Copy TapLink ${row.code}`}
+                            className="min-h-[34px] min-w-[34px] rounded-lg bg-white/[0.06] border border-white/10 text-zinc-300 hover:text-white flex items-center justify-center transition"
+                          >
+                            {copiedTlId === `link-${row.id}` ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTapLinkItem(row)}
+                            aria-label={`Delete TapLink ${row.code}`}
+                            className="min-h-[34px] min-w-[34px] rounded-lg bg-red-500/10 border border-red-500/25 text-red-300 hover:bg-red-500/20 flex items-center justify-center transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          );
+        })()}
       </main>
     </div>
   );

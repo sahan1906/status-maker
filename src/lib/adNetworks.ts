@@ -534,6 +534,44 @@ export async function runShortsSwipeAd(
   return 'skipped';
 }
 
+export function shouldTriggerTapLinkAd(config: PublicAppConfig): boolean {
+  return (
+    isCleanAdsRewardedActive(config) ||
+    isLegacyRewardedActive(config) ||
+    isCleanAdsInterstitialActive(config)
+  );
+}
+
+/**
+ * Triggers 1 short ad for a TapLink audience unlock using whichever ad network
+ * is active in Admin (CleanAds Rewarded -> AdsGram/Monetag/RichAds/GigaPub -> CleanAds Interstitial).
+ */
+export async function runTapLinkAd(
+  config: PublicAppConfig
+): Promise<'completed' | 'skipped' | 'cancelled'> {
+  if (isCleanAdsRewardedActive(config) || isLegacyRewardedActive(config)) {
+    return runRewardedAd(config);
+  }
+
+  if (isCleanAdsInterstitialActive(config)) {
+    const { outcome } = await runCleanAdsUnitDetailed(
+      config.cleanads_interstitial_placement_id,
+      config.cleanads_test_mode,
+      false
+    );
+    if (outcome === 'completed') {
+      lastAdShownAt = Date.now();
+      return 'completed';
+    }
+    if (outcome === 'cancelled') {
+      return 'cancelled';
+    }
+    return 'skipped';
+  }
+
+  return 'skipped';
+}
+
 export async function fetchPublicAppConfig(): Promise<PublicAppConfig> {
   try {
     const res = await fetch('/api/config', { cache: 'no-store' });

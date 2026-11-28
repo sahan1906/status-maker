@@ -132,6 +132,100 @@ export function buildEditsTelegramDirectLink(
   return `/edits${query}`;
 }
 
+export interface InitialTapLinkRouteState {
+  isTapLinksTab: boolean;
+  unlockCode: string;
+}
+
+export function getInitialTapLinkRouteState(): InitialTapLinkRouteState {
+  if (typeof window === 'undefined') {
+    return { isTapLinksTab: false, unlockCode: '' };
+  }
+
+  const pathname = window.location.pathname.replace(/\/+$/, '');
+  const startParam = readTelegramStartParam();
+
+  if (startParam.startsWith('tl_') && startParam.length > 3) {
+    return { isTapLinksTab: false, unlockCode: startParam.slice(3).trim().toLowerCase() };
+  }
+  if (startParam === 'taplinks') {
+    return { isTapLinksTab: true, unlockCode: '' };
+  }
+
+  const shortMatch = pathname.match(/^\/l\/([a-zA-Z0-9_-]{3,32})$/);
+  if (shortMatch?.[1]) {
+    return { isTapLinksTab: false, unlockCode: shortMatch[1].toLowerCase() };
+  }
+
+  if (pathname === '/taplinks') {
+    return { isTapLinksTab: true, unlockCode: '' };
+  }
+
+  return { isTapLinksTab: false, unlockCode: '' };
+}
+
+export function buildTapLinkTelegramDirectLink(
+  botUsername: string,
+  miniAppShortName: string,
+  code?: string
+): string {
+  const cleanBot = (botUsername || '').replace(/^@+/, '').trim();
+  const cleanApp = (miniAppShortName || '').trim();
+  const cleanCode = (code || '').trim().toLowerCase();
+  const startVal = cleanCode ? `tl_${cleanCode}` : 'taplinks';
+
+  if (cleanBot) {
+    if (cleanApp) {
+      return `https://t.me/${cleanBot}/${cleanApp}?startapp=${encodeURIComponent(startVal)}`;
+    }
+    return `https://t.me/${cleanBot}?startapp=${encodeURIComponent(startVal)}`;
+  }
+
+  if (typeof window !== 'undefined') {
+    return cleanCode
+      ? `${window.location.origin}/l/${encodeURIComponent(cleanCode)}`
+      : `${window.location.origin}/taplinks`;
+  }
+  return cleanCode ? `/l/${encodeURIComponent(cleanCode)}` : '/taplinks';
+}
+
+export function openVerifiedDestinationUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return false;
+  }
+
+  const safeUrl = parsed.toString();
+  const tg = window.Telegram?.WebApp;
+  const isTelegramLink =
+    parsed.hostname === 't.me' ||
+    parsed.hostname === 'telegram.me' ||
+    parsed.hostname === 'telegram.dog';
+
+  if (tg) {
+    try {
+      if (isTelegramLink && typeof tg.openTelegramLink === 'function') {
+        tg.openTelegramLink(safeUrl);
+        return true;
+      }
+      if (typeof tg.openLink === 'function') {
+        tg.openLink(safeUrl);
+        return true;
+      }
+    } catch {
+      // Fall through to standard navigation
+    }
+  }
+
+  window.location.assign(safeUrl);
+  return true;
+}
+
 export function openTelegramShareUrl(shareUrl: string, text: string): boolean {
   const tg = window.Telegram?.WebApp;
   const tgShare = `https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(text)}`;

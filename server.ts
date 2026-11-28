@@ -19,7 +19,35 @@ interface LocalUser {
   last_active_at: string;
 }
 
+interface LocalTapLink {
+  id: string;
+  code: string;
+  destination_url: string;
+  title: string;
+  creator_type: 'app' | 'api';
+  creator_ref: string;
+  creator_label: string;
+  clicks: number;
+  unlocks: number;
+  created_at: number;
+}
+
+interface LocalTapLinkKey {
+  id: string;
+  name: string;
+  contact_note: string;
+  key_prefix: string;
+  key_hash: string;
+  status: 'active' | 'revoked';
+  daily_limit: number;
+  links_created: number;
+  last_used_at: number | null;
+  created_at: number;
+}
+
 const usersMap = new Map<string, LocalUser>();
+const tapLinksMap = new Map<string, LocalTapLink>();
+const tapLinkKeysMap = new Map<string, LocalTapLinkKey>();
 const settingsMap = new Map<string, string>([
   ['site_name', 'ReelCraft'],
   ['watermark_text', 'ReelCraft'],
@@ -459,6 +487,450 @@ async function startServer() {
 
   app.delete('/api/admin/shorts', requireAdmin, (req, res) => {
     res.json({ ok: true, id: String(req.query.id || '') });
+  });
+
+  // ---- TapLinks Local Preview Mirror (matches Cloudflare D1 /functions/api/*) ----
+  const RESERVED_TL_ALIASES = new Set(['admin', 'api', 'edits', 'shorts', 'taplinks', 'templates', 'editor', 'l', 'v1']);
+  const TL_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+  const genTlCode = (len = 7) => {
+    const bytes = crypto.randomBytes(len);
+    let out = '';
+    for (let i = 0; i < len; i += 1) out += TL_ALPHABET[bytes[i] % TL_ALPHABET.length];
+    return out;
+  };
+
+  const sha256Node = (val: string) => crypto.createHash('sha256').update(val).digest('hex');
+
+  const validateTlUrl = (raw: unknown, origin: string): { ok: true; url: string; host: string } | { ok: false; error: string } => {
+    if (typeof raw !== 'string' || !raw.trim()) return { ok: false, error: 'Destination URL is required.' };
+    let candidate = raw.trim();
+    if (candidate.length > 2048) return { ok: false, error: 'Destination URL is too long.' };
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(candidate)) candidate = `https://${candidate}`;
+    let parsed: URL;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      return { ok: false, error: 'Enter a valid http:// or https:// destination URL.' };
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return { ok: false, error: 'Only http:// and https:// URLs are allowed.' };
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host === '[::1]' ||
+      /^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      !host.includes('.')
+    ) {
+      return { ok: false, error: 'Enter a valid public destination domain.' };
+    }
+    try {
+      if (parsed.origin === new URL(origin).origin && parsed.pathname.startsWith('/l/')) {
+        return { ok: false, error: 'Cannot shorten an existing TapLink URL.' };
+      }
+    } catch {
+      // ignore
+    }
+    return { ok: true, url: parsed.toString(), host: parsed.hostname.replace(/^www\./, '') };
+  };
+
+  const buildTlUrls = (code: string, origin: string) => {
+    const bot = (settingsMap.get('telegram_bot_username') || '').replace(/^@+/, '').trim();
+    const appName = (settingsMap.get('telegram_miniapp_short_name') || '').trim();
+    const webUrl = `${origin.replace(/\/+$/, '')}/l/${encodeURIComponent(code)}`;
+    const telegramUrl = bot
+      ? appName
+        ? `https://t.me/${bot}/${appName}?startapp=${encodeURIComponent(`tl_${code}`)}`
+        : `https://t.me/${bot}?startapp=${encodeURIComponent(`tl_${code}`)}`
+      : '';
+    return { short_url: telegramUrl || webUrl, telegram_url: telegramUrl, web_url: webUrl };
+  };
+
+  const getReqOrigin = (req: Request) => {
+    const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+    const host = req.headers.host || `localhost:${PORT}`;
+    return `${proto}://${host}`;
+  };
+
+  const verifyDevKeyLocal = (req: Request): { ok: true; key: LocalTapLinkKey } | { ok: false; status: number; error: string } => {
+    const auth = req.headers.authorization || '';
+    const xKey = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'] : '';
+    const rawKey = auth.startsWith('Bearer ') ? auth.slice(7).trim() : xKey.trim();
+    if (!rawKey || !rawKey.startsWith('tl_live_') || rawKey.length < 24) {
+      return { ok: false, status: 401, error: 'Missing or invalid TapLinks API key.' };
+    }
+    const hash = sha256Node(rawKey);
+    const found = Array.from(tapLinkKeysMap.values()).find((k) => timingSafeEqualStr(k.key_hash, hash));
+    if (!found) return { ok: false, status: 401, error: 'Invalid API key.' };
+    if (found.status !== 'active') return { ok: false, status: 403, error: 'This API key is suspended.' };
+    const dayStart = Date.now() - 24 * 60 * 60 * 1000;
+    const used24h = Array.from(tapLinksMap.values()).filter(
+      (l) => l.creator_type === 'api' && l.creator_ref === found.id && l.created_at >= dayStart
+    ).length;
+    if (found.daily_limit > 0 && used24h >= found.daily_limit) {
+      return { ok: false, status: 429, error: `Daily quota reached (${found.daily_limit}/24h).` };
+    }
+    return { ok: true, key: found };
+  };
+
+  app.get('/api/taplinks', (req, res) => {
+    const origin = getReqOrigin(req);
+    const code = String(req.query.code || '').trim().toLowerCase();
+    const codesParam = String(req.query.codes || '').trim();
+
+    if (code) {
+      const row = tapLinksMap.get(code);
+      if (!row) {
+        res.status(404).json({ error: 'TapLink not found or expired.' });
+        return;
+      }
+      row.clicks += 1;
+      res.json({
+        ok: true,
+        link: {
+          code: row.code,
+          title: row.title,
+          destination_host: new URL(row.destination_url).hostname.replace(/^www\./, ''),
+          clicks: row.clicks,
+          unlocks: row.unlocks,
+          created_at: new Date(row.created_at).toISOString(),
+          ...buildTlUrls(row.code, origin),
+        },
+      });
+      return;
+    }
+
+    if (codesParam) {
+      const codes = codesParam
+        .split(',')
+        .map((c) => c.trim().toLowerCase())
+        .filter(Boolean)
+        .slice(0, 40);
+      const links = codes
+        .map((c) => tapLinksMap.get(c))
+        .filter((r): r is LocalTapLink => Boolean(r))
+        .sort((a, b) => b.created_at - a.created_at)
+        .map((row) => ({
+          id: row.id,
+          code: row.code,
+          title: row.title,
+          destination_url: row.destination_url,
+          destination_host: new URL(row.destination_url).hostname.replace(/^www\./, ''),
+          clicks: row.clicks,
+          unlocks: row.unlocks,
+          created_at: new Date(row.created_at).toISOString(),
+          ...buildTlUrls(row.code, origin),
+        }));
+      res.json({ ok: true, links });
+      return;
+    }
+
+    res.json({ ok: true, links: [] });
+  });
+
+  app.post('/api/taplinks', (req, res) => {
+    const origin = getReqOrigin(req);
+    const checked = validateTlUrl(req.body?.url, origin);
+    if (!checked.ok) {
+      res.status(400).json({ error: checked.error });
+      return;
+    }
+    const rawAlias = typeof req.body?.alias === 'string' ? req.body.alias.trim().toLowerCase() : '';
+    if (rawAlias) {
+      if (!/^[a-z0-9_-]{3,32}$/.test(rawAlias) || RESERVED_TL_ALIASES.has(rawAlias)) {
+        res.status(400).json({ error: 'Invalid or reserved custom alias.' });
+        return;
+      }
+      if (tapLinksMap.has(rawAlias)) {
+        res.status(409).json({ error: `Alias "${rawAlias}" is already taken.` });
+        return;
+      }
+    }
+    const code = rawAlias || genTlCode(7);
+    const title =
+      typeof req.body?.title === 'string' && req.body.title.trim()
+        ? req.body.title.replace(/\s+/g, ' ').trim().slice(0, 90)
+        : checked.host;
+    const creatorRef = typeof req.body?.creator_ref === 'string' ? req.body.creator_ref.trim().slice(0, 64) : '';
+    const row: LocalTapLink = {
+      id: `tl_${Date.now().toString(36)}_${genTlCode(5)}`,
+      code,
+      destination_url: checked.url,
+      title,
+      creator_type: 'app',
+      creator_ref: creatorRef,
+      creator_label: creatorRef ? `User ${creatorRef}` : 'Mini App',
+      clicks: 0,
+      unlocks: 0,
+      created_at: Date.now(),
+    };
+    tapLinksMap.set(code, row);
+    res.status(201).json({
+      ok: true,
+      link: {
+        id: row.id,
+        code: row.code,
+        title: row.title,
+        destination_url: row.destination_url,
+        destination_host: checked.host,
+        clicks: 0,
+        unlocks: 0,
+        created_at: new Date(row.created_at).toISOString(),
+        ...buildTlUrls(row.code, origin),
+      },
+    });
+  });
+
+  app.post('/api/taplinks-unlock', (req, res) => {
+    const code = typeof req.body?.code === 'string' ? req.body.code.trim().toLowerCase() : '';
+    const row = tapLinksMap.get(code);
+    if (!row) {
+      res.status(404).json({ error: 'TapLink not found.' });
+      return;
+    }
+    row.unlocks += 1;
+    res.json({
+      ok: true,
+      code: row.code,
+      title: row.title,
+      destination_url: row.destination_url,
+      unlocks: row.unlocks,
+    });
+  });
+
+  // Verified Developer API v1
+  app.options('/api/v1/taplinks*', (_req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key');
+    res.status(204).end();
+  });
+
+  app.get('/api/v1/taplinks', (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const auth = verifyDevKeyLocal(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const origin = getReqOrigin(req);
+    const own = Array.from(tapLinksMap.values())
+      .filter((l) => l.creator_type === 'api' && l.creator_ref === auth.key.id)
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, 50)
+      .map((row) => ({
+        code: row.code,
+        title: row.title,
+        destination_url: row.destination_url,
+        destination_host: new URL(row.destination_url).hostname.replace(/^www\./, ''),
+        clicks: row.clicks,
+        unlocks: row.unlocks,
+        created_at: new Date(row.created_at).toISOString(),
+        ...buildTlUrls(row.code, origin),
+      }));
+    res.json({ ok: true, partner: auth.key.name, daily_limit: auth.key.daily_limit, total: own.length, links: own });
+  });
+
+  app.post('/api/v1/taplinks/shorten', (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const auth = verifyDevKeyLocal(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const origin = getReqOrigin(req);
+    const checked = validateTlUrl(req.body?.url, origin);
+    if (!checked.ok) {
+      res.status(400).json({ ok: false, error: checked.error });
+      return;
+    }
+    const rawAlias = typeof req.body?.alias === 'string' ? req.body.alias.trim().toLowerCase() : '';
+    if (rawAlias && (!/^[a-z0-9_-]{3,32}$/.test(rawAlias) || RESERVED_TL_ALIASES.has(rawAlias) || tapLinksMap.has(rawAlias))) {
+      res.status(409).json({ ok: false, error: 'Alias invalid or already taken.' });
+      return;
+    }
+    const code = rawAlias || genTlCode(7);
+    const row: LocalTapLink = {
+      id: `tl_${Date.now().toString(36)}_${genTlCode(5)}`,
+      code,
+      destination_url: checked.url,
+      title: typeof req.body?.title === 'string' && req.body.title.trim() ? req.body.title.trim().slice(0, 90) : checked.host,
+      creator_type: 'api',
+      creator_ref: auth.key.id,
+      creator_label: `API · ${auth.key.name}`,
+      clicks: 0,
+      unlocks: 0,
+      created_at: Date.now(),
+    };
+    tapLinksMap.set(code, row);
+    auth.key.links_created += 1;
+    auth.key.last_used_at = Date.now();
+    res.status(201).json({
+      ok: true,
+      code: row.code,
+      title: row.title,
+      destination_url: row.destination_url,
+      ...buildTlUrls(row.code, origin),
+      created_at: new Date(row.created_at).toISOString(),
+    });
+  });
+
+  app.post('/api/v1/taplinks/bulk', (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const auth = verifyDevKeyLocal(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const rawItems = Array.isArray(req.body?.links) ? req.body.links : Array.isArray(req.body?.urls) ? req.body.urls : null;
+    if (!rawItems || rawItems.length === 0 || rawItems.length > 50) {
+      res.status(400).json({ ok: false, error: 'Provide 1 to 50 items in "links".' });
+      return;
+    }
+    const origin = getReqOrigin(req);
+    const results: Array<Record<string, unknown>> = [];
+    let created = 0;
+    rawItems.forEach((entry: unknown, i: number) => {
+      const rawUrl = typeof entry === 'string' ? entry : (entry as Record<string, unknown>)?.url;
+      const rawTitle = typeof entry === 'object' && entry ? (entry as Record<string, unknown>).title : '';
+      const checked = validateTlUrl(rawUrl, origin);
+      if (!checked.ok) {
+        results.push({ index: i, ok: false, url: rawUrl, error: checked.error });
+        return;
+      }
+      const code = genTlCode(7);
+      const row: LocalTapLink = {
+        id: `tl_${Date.now().toString(36)}_${genTlCode(5)}`,
+        code,
+        destination_url: checked.url,
+        title: typeof rawTitle === 'string' && rawTitle.trim() ? rawTitle.trim().slice(0, 90) : checked.host,
+        creator_type: 'api',
+        creator_ref: auth.key.id,
+        creator_label: `API · ${auth.key.name}`,
+        clicks: 0,
+        unlocks: 0,
+        created_at: Date.now(),
+      };
+      tapLinksMap.set(code, row);
+      created += 1;
+      results.push({ index: i, ok: true, code, title: row.title, destination_url: row.destination_url, ...buildTlUrls(code, origin) });
+    });
+    if (created > 0) {
+      auth.key.links_created += created;
+      auth.key.last_used_at = Date.now();
+    }
+    res.status(created > 0 ? 201 : 400).json({ ok: true, total_requested: rawItems.length, created, failed: rawItems.length - created, results });
+  });
+
+  // Protected Admin TapLinks & Developer API Keys
+  app.get('/api/admin/taplinks', requireAdmin, (req, res) => {
+    const origin = getReqOrigin(req);
+    const links = Array.from(tapLinksMap.values()).sort((a, b) => b.created_at - a.created_at);
+    const keys = Array.from(tapLinkKeysMap.values()).sort((a, b) => b.created_at - a.created_at);
+    res.json({
+      ok: true,
+      stats: {
+        totalLinks: links.length,
+        totalClicks: links.reduce((sum, l) => sum + l.clicks, 0),
+        totalUnlocks: links.reduce((sum, l) => sum + l.unlocks, 0),
+        activeKeys: keys.filter((k) => k.status === 'active').length,
+      },
+      apiKeys: keys.map((k) => ({
+        id: k.id,
+        name: k.name,
+        contact_note: k.contact_note,
+        key_prefix: k.key_prefix,
+        status: k.status,
+        daily_limit: k.daily_limit,
+        links_created: k.links_created,
+        last_used_at: k.last_used_at ? new Date(k.last_used_at).toISOString() : null,
+        created_at: new Date(k.created_at).toISOString(),
+      })),
+      recentLinks: links.slice(0, 60).map((row) => ({
+        id: row.id,
+        code: row.code,
+        title: row.title,
+        destination_url: row.destination_url,
+        destination_host: new URL(row.destination_url).hostname.replace(/^www\./, ''),
+        creator_type: row.creator_type,
+        creator_label: row.creator_label,
+        clicks: row.clicks,
+        unlocks: row.unlocks,
+        created_at: new Date(row.created_at).toISOString(),
+        ...buildTlUrls(row.code, origin),
+      })),
+    });
+  });
+
+  app.post('/api/admin/taplinks', requireAdmin, (req, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+    if (!name) {
+      res.status(400).json({ error: 'Enter the verified developer or partner name.' });
+      return;
+    }
+    const contactNote = typeof req.body?.contact_note === 'string' ? req.body.contact_note.trim().slice(0, 140) : '';
+    const parsedLimit = Number.parseInt(String(req.body?.daily_limit ?? '500'), 10);
+    const dailyLimit = Number.isFinite(parsedLimit) ? Math.max(10, Math.min(50000, parsedLimit)) : 500;
+    const plainKey = `tl_live_${crypto.randomBytes(24).toString('hex')}`;
+    const keyPrefix = `${plainKey.slice(0, 14)}••••${plainKey.slice(-4)}`;
+    const id = `key_${Date.now().toString(36)}_${genTlCode(5)}`;
+    const entry: LocalTapLinkKey = {
+      id,
+      name,
+      contact_note: contactNote,
+      key_prefix: keyPrefix,
+      key_hash: sha256Node(plainKey),
+      status: 'active',
+      daily_limit: dailyLimit,
+      links_created: 0,
+      last_used_at: null,
+      created_at: Date.now(),
+    };
+    tapLinkKeysMap.set(id, entry);
+    res.status(201).json({
+      ok: true,
+      plain_key: plainKey,
+      apiKey: {
+        id: entry.id,
+        name: entry.name,
+        contact_note: entry.contact_note,
+        key_prefix: entry.key_prefix,
+        status: entry.status,
+        daily_limit: entry.daily_limit,
+        links_created: 0,
+        last_used_at: null,
+        created_at: new Date(entry.created_at).toISOString(),
+      },
+    });
+  });
+
+  app.patch('/api/admin/taplinks', requireAdmin, (req, res) => {
+    const id = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+    const status = req.body?.status === 'revoked' ? 'revoked' : req.body?.status === 'active' ? 'active' : '';
+    const found = tapLinkKeysMap.get(id);
+    if (!found || !status) {
+      res.status(400).json({ error: 'Invalid key id or status.' });
+      return;
+    }
+    found.status = status;
+    res.json({ ok: true, id, status });
+  });
+
+  app.delete('/api/admin/taplinks', requireAdmin, (req, res) => {
+    const type = req.query.type === 'link' ? 'link' : 'key';
+    const id = String(req.query.id || '').trim();
+    if (type === 'link') {
+      for (const [code, row] of tapLinksMap.entries()) {
+        if (row.id === id) tapLinksMap.delete(code);
+      }
+    } else {
+      tapLinkKeysMap.delete(id);
+    }
+    res.json({ ok: true, type, id });
   });
 
   // Vite dev middleware or static dist serving

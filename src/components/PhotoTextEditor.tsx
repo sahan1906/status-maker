@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -51,9 +51,9 @@ interface PhotoTextEditorProps {
   chromaSensitivity: number;
   isLoadingMedia?: boolean;
   mediaError?: string | null;
-  onAddPhotos: (files: FileList) => void;
-  onAddVideos: (files: FileList) => void;
-  onSetGreenScreenVideo?: (files: FileList) => void;
+  onAddPhotos: (files: File[]) => void;
+  onAddVideos: (files: File[]) => void;
+  onSetGreenScreenVideo?: (files: File[]) => void;
   onRemovePhoto: (id: string) => void;
   onMovePhoto: (fromIdx: number, toIdx: number) => void;
   onTrimClip: (id: string, trimStart: number, trimEnd: number) => void;
@@ -127,10 +127,6 @@ export function PhotoTextEditor({
   const [splitPointSec, setSplitPointSec] = useState<number>(0);
   const [splitFeedback, setSplitFeedback] = useState<string | null>(null);
 
-  const photoInputRef = useRef<HTMLInputElement | null>(null);
-  const videoInputRef = useRef<HTMLInputElement | null>(null);
-  const greenVideoInputRef = useRef<HTMLInputElement | null>(null);
-
   const hasOnlySamples = photos.every((p) => p.isSample);
   const slideSec = getSlideDuration(template, pace);
   const specialMode = template.specialMode ?? 'none';
@@ -202,27 +198,30 @@ export function PhotoTextEditor({
   }, [splitFeedback]);
 
   const handlePhotoFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      onAddPhotos(e.target.files);
-      e.target.value = '';
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (picked.length > 0) {
+      onAddPhotos(picked);
     }
   };
 
   const handleVideoFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      onAddVideos(e.target.files);
-      e.target.value = '';
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (picked.length > 0) {
+      onAddVideos(picked);
     }
   };
 
   const handleGreenVideoFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (picked.length > 0) {
       if (onSetGreenScreenVideo) {
-        onSetGreenScreenVideo(e.target.files);
+        onSetGreenScreenVideo(picked);
       } else {
-        onAddVideos(e.target.files);
+        onAddVideos(picked);
       }
-      e.target.value = '';
     }
   };
 
@@ -263,34 +262,6 @@ export function PhotoTextEditor({
 
   return (
     <div className="flex flex-col bg-[#101013] border-t lg:border border-white/10 lg:rounded-3xl overflow-hidden">
-      {/* Separate Photo & Video pickers so mobile/Telegram opens native galleries directly */}
-      <input
-        ref={photoInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        onChange={handlePhotoFileChange}
-        className="sr-only"
-        aria-label="Pick up to 50 photos from gallery"
-      />
-      <input
-        ref={videoInputRef}
-        type="file"
-        accept="video/*"
-        multiple
-        onChange={handleVideoFileChange}
-        className="sr-only"
-        aria-label="Pick video clips from gallery"
-      />
-      <input
-        ref={greenVideoInputRef}
-        type="file"
-        accept="video/*"
-        onChange={handleGreenVideoFileChange}
-        className="sr-only"
-        aria-label="Pick your green-screen foreground video"
-      />
-
       {/* CapCut / InShot Tool Selector Row */}
       <div
         role="tablist"
@@ -486,53 +457,89 @@ export function PhotoTextEditor({
               </button>
             )}
 
-            {/* Horizontal scrollable filmstrip with dedicated pickers */}
+            {/* Horizontal scrollable filmstrip with direct native file pickers (Telegram WebView safe) */}
             <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
               {isChromaMode && !isPresetOverlay && (
-                <button
-                  type="button"
-                  onClick={() => greenVideoInputRef.current?.click()}
-                  disabled={isLoadingMedia}
-                  className="shrink-0 w-[74px] h-[94px] rounded-xl bg-emerald-400 text-[#05140B] hover:bg-emerald-300 disabled:opacity-40 flex flex-col items-center justify-center gap-1 px-1 text-center transition"
+                <label
+                  className={`relative shrink-0 w-[74px] h-[94px] rounded-xl bg-emerald-400 text-[#05140B] hover:bg-emerald-300 flex flex-col items-center justify-center gap-1 px-1 text-center transition overflow-hidden ${
+                    isLoadingMedia ? 'opacity-40 pointer-events-none' : 'cursor-pointer active:scale-95'
+                  }`}
                 >
+                  <input
+                    type="file"
+                    accept="video/*,.mp4,.mov,.webm,.m4v,.mkv,.3gp"
+                    disabled={isLoadingMedia}
+                    onClick={(e) => {
+                      e.currentTarget.value = '';
+                    }}
+                    onChange={handleGreenVideoFileChange}
+                    aria-label="Pick your green-screen foreground video"
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
                   {isLoadingMedia ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="w-4 h-4 animate-spin pointer-events-none" />
                   ) : (
-                    <Video className="w-4 h-4" />
+                    <Video className="w-4 h-4 pointer-events-none" />
                   )}
-                  <span className="text-[10px] font-extrabold leading-tight">
+                  <span className="text-[10px] font-extrabold leading-tight pointer-events-none">
                     {chromaForegroundClip ? 'Swap Green' : '+ Green Vid'}
                   </span>
-                </button>
+                </label>
               )}
 
-              <button
-                type="button"
-                onClick={() => photoInputRef.current?.click()}
-                disabled={isLoadingMedia || (!hasOnlySamples && photos.length >= 50)}
-                className="shrink-0 w-[68px] h-[94px] rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 disabled:opacity-40 flex flex-col items-center justify-center gap-1 transition"
+              <label
+                className={`relative shrink-0 w-[68px] h-[94px] rounded-xl bg-white text-[#08080A] hover:bg-zinc-200 flex flex-col items-center justify-center gap-1 transition overflow-hidden ${
+                  isLoadingMedia || (!hasOnlySamples && photos.length >= 50)
+                    ? 'opacity-40 pointer-events-none'
+                    : 'cursor-pointer active:scale-95'
+                }`}
               >
-                <ImagePlus className="w-4 h-4" />
-                <span className="text-[10px] font-bold">
+                <input
+                  type="file"
+                  accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.jfif"
+                  multiple
+                  disabled={isLoadingMedia || (!hasOnlySamples && photos.length >= 50)}
+                  onClick={(e) => {
+                    e.currentTarget.value = '';
+                  }}
+                  onChange={handlePhotoFileChange}
+                  aria-label="Pick up to 50 photos from gallery"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
+                <ImagePlus className="w-4 h-4 pointer-events-none" />
+                <span className="text-[10px] font-bold pointer-events-none">
                   {isChromaMode && !isPresetOverlay ? '+ Photos' : '+ Photo'}
                 </span>
-              </button>
+              </label>
 
-              <button
-                type="button"
-                onClick={() => videoInputRef.current?.click()}
-                disabled={isLoadingMedia || (!hasOnlySamples && photos.length >= 50)}
-                className="shrink-0 w-[68px] h-[94px] rounded-xl bg-amber-400/15 text-amber-200 border border-amber-400/40 hover:bg-amber-400/25 disabled:opacity-40 flex flex-col items-center justify-center gap-1 transition"
+              <label
+                className={`relative shrink-0 w-[68px] h-[94px] rounded-xl bg-amber-400/15 text-amber-200 border border-amber-400/40 hover:bg-amber-400/25 flex flex-col items-center justify-center gap-1 transition overflow-hidden ${
+                  isLoadingMedia || (!hasOnlySamples && photos.length >= 50)
+                    ? 'opacity-40 pointer-events-none'
+                    : 'cursor-pointer active:scale-95'
+                }`}
               >
+                <input
+                  type="file"
+                  accept="video/*,.mp4,.mov,.webm,.m4v,.mkv,.3gp"
+                  multiple
+                  disabled={isLoadingMedia || (!hasOnlySamples && photos.length >= 50)}
+                  onClick={(e) => {
+                    e.currentTarget.value = '';
+                  }}
+                  onChange={handleVideoFileChange}
+                  aria-label="Pick video clips from gallery"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
                 {isLoadingMedia ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <Loader2 className="w-4 h-4 animate-spin pointer-events-none" />
                 ) : (
-                  <Video className="w-4 h-4" />
+                  <Video className="w-4 h-4 pointer-events-none" />
                 )}
-                <span className="text-[10px] font-bold">
+                <span className="text-[10px] font-bold pointer-events-none">
                   {isChromaMode && !isPresetOverlay ? '+ Inside Vid' : '+ Video'}
                 </span>
-              </button>
+              </label>
 
               {photos.map((photo, idx) => {
                 const isSelected = idx === activeIdx;
@@ -775,19 +782,30 @@ export function PhotoTextEditor({
                     <p className="text-xs text-zinc-400 max-w-xs">
                       Add a video clip to trim its start/end or split and cut out unwanted parts.
                     </p>
-                    <button
-                      type="button"
-                      disabled={isLoadingMedia}
-                      onClick={() => videoInputRef.current?.click()}
-                      className="min-h-[40px] px-4 rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 disabled:opacity-40 text-xs font-bold flex items-center gap-1.5 transition"
+                    <label
+                      className={`relative min-h-[40px] px-4 rounded-xl bg-amber-400 text-[#08080A] hover:bg-amber-300 text-xs font-bold flex items-center gap-1.5 transition overflow-hidden ${
+                        isLoadingMedia ? 'opacity-40 pointer-events-none' : 'cursor-pointer active:scale-95'
+                      }`}
                     >
+                      <input
+                        type="file"
+                        accept="video/*,.mp4,.mov,.webm,.m4v,.mkv,.3gp"
+                        multiple
+                        disabled={isLoadingMedia}
+                        onClick={(e) => {
+                          e.currentTarget.value = '';
+                        }}
+                        onChange={handleVideoFileChange}
+                        aria-label="Add video clip"
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                      />
                       {isLoadingMedia ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <Loader2 className="w-4 h-4 animate-spin pointer-events-none" />
                       ) : (
-                        <Video className="w-4 h-4" />
+                        <Video className="w-4 h-4 pointer-events-none" />
                       )}
-                      <span>Add Video Clip</span>
-                    </button>
+                      <span className="pointer-events-none">Add Video Clip</span>
+                    </label>
                   </>
                 )}
               </div>

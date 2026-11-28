@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Clapperboard, Download, Images, LayoutGrid } from 'lucide-react';
+import { ArrowLeft, Clapperboard, Download, Images, LayoutGrid, Link2 } from 'lucide-react';
 import { AdminConsole } from './components/AdminConsole';
 import { DownloadVideoModal } from './components/DownloadVideoModal';
 import { EditsFeedView } from './components/EditsFeedView';
 import { GalleryPhoto, PhotoTextEditor } from './components/PhotoTextEditor';
+import { TapLinksView } from './components/TapLinksView';
+import { TapLinkUnlockView } from './components/TapLinkUnlockView';
 import { TemplateGallery } from './components/TemplateGallery';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import {
@@ -27,6 +29,7 @@ import {
 } from './lib/adNetworks';
 import {
   getInitialEditsRouteState,
+  getInitialTapLinkRouteState,
   haptic,
   initTelegramApp,
   TelegramContextInfo,
@@ -45,7 +48,7 @@ import {
   RenderClip,
 } from './lib/videoRenderer';
 
-type StudioView = 'templates' | 'edit' | 'edits';
+type StudioView = 'templates' | 'edit' | 'edits' | 'taplinks';
 
 interface DecodedEntry {
   source: FrameSource;
@@ -73,6 +76,9 @@ export default function App() {
   const [initialEditTemplateId, setInitialEditTemplateId] = useState<string>(
     () => getInitialEditsRouteState().initialTemplateId
   );
+  const [unlockTapLinkCode, setUnlockTapLinkCode] = useState<string>(
+    () => getInitialTapLinkRouteState().unlockCode
+  );
 
   const [appConfig, setAppConfig] = useState<PublicAppConfig>(DEFAULT_APP_CONFIG);
   const [tgContext, setTgContext] = useState<TelegramContextInfo>({
@@ -83,10 +89,12 @@ export default function App() {
     startParam: '',
   });
 
-  // Clean 3-tab workflow: Templates, Edits, and Editor
-  const [view, setView] = useState<StudioView>(() =>
-    getInitialEditsRouteState().isEdits ? 'edits' : 'templates'
-  );
+  // Clean 4-tab workflow: Templates, Edits, TapLinks, and Editor
+  const [view, setView] = useState<StudioView>(() => {
+    if (getInitialTapLinkRouteState().isTapLinksTab) return 'taplinks';
+    if (getInitialEditsRouteState().isEdits) return 'edits';
+    return 'templates';
+  });
   const [activeCategory, setActiveCategory] = useState<TemplateCategory>('all');
   const [selectedTemplate, setSelectedTemplate] = useState<ReelTemplate>(BLANK_TEMPLATE);
 
@@ -194,7 +202,12 @@ export default function App() {
   useEffect(() => {
     const tgInfo = initTelegramApp();
     setTgContext(tgInfo);
-    if (tgInfo.startParam === 'edits' || tgInfo.startParam === 'shorts') {
+    if (tgInfo.startParam.startsWith('tl_') && tgInfo.startParam.length > 3) {
+      setUnlockTapLinkCode(tgInfo.startParam.slice(3).trim().toLowerCase());
+    } else if (tgInfo.startParam === 'taplinks') {
+      setUnlockTapLinkCode('');
+      setView('taplinks');
+    } else if (tgInfo.startParam === 'edits' || tgInfo.startParam === 'shorts') {
       setInitialEditVideoId('');
       setInitialEditTemplateId('');
       setView('edits');
@@ -215,13 +228,23 @@ export default function App() {
 
     const onPop = () => {
       setIsAdminRoute(window.location.pathname.replace(/\/+$/, '') === '/admin');
+      const nextTap = getInitialTapLinkRouteState();
+      if (nextTap.unlockCode) {
+        setUnlockTapLinkCode(nextTap.unlockCode);
+        return;
+      }
+      setUnlockTapLinkCode('');
+      if (nextTap.isTapLinksTab) {
+        setView('taplinks');
+        return;
+      }
       const nextEdits = getInitialEditsRouteState();
       if (nextEdits.isEdits) {
         setInitialEditVideoId(nextEdits.initialVideoId);
         setInitialEditTemplateId(nextEdits.initialTemplateId);
         setView('edits');
       } else {
-        setView((prev) => (prev === 'edits' ? 'templates' : prev));
+        setView((prev) => (prev === 'edits' || prev === 'taplinks' ? 'templates' : prev));
       }
     };
     window.addEventListener('popstate', onPop);
@@ -368,12 +391,14 @@ export default function App() {
     const url = selectedTemplate.presetOverlayUrl;
     if (!url) {
       setPresetOverlayClip(null);
+      setIsLoadingMedia(false);
       return;
     }
 
     const cached = presetVideoCacheRef.current.get(url);
     if (cached) {
       setPresetOverlayClip(cached);
+      setIsLoadingMedia(false);
       return;
     }
 
@@ -408,11 +433,12 @@ export default function App() {
         }
       })
       .finally(() => {
-        if (!cancelled) setIsLoadingMedia(false);
+        setIsLoadingMedia(false);
       });
 
     return () => {
       cancelled = true;
+      setIsLoadingMedia(false);
     };
   }, [selectedTemplate.id, selectedTemplate.presetOverlayUrl]);
 
@@ -449,11 +475,25 @@ export default function App() {
     setView('edits');
   };
 
-  const handleAddPhotos = (files: FileList) => {
+  const handleAddPhotos = (files: File[]) => {
     haptic('light');
     setMediaError(null);
-    const validFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
-    if (validFiles.length === 0) return;
+    const validFiles = files.filter((f) => {
+      if (f.type.startsWith('image/')) return true;
+      if (/\.(jpe?g|png|webp|gif|bmp|avif|heic|heif|jfif|tiff?)$/i.test(f.name)) return true;
+      // Android / Telegram WebView photo pickers sometimes return empty or generic MIME types
+      if (
+        (!f.type || f.type === 'application/octet-stream') &&
+        !/\.(mp4|mov|webm|m4v|mkv|3gp|mp3|wav|m4a|pdf|zip|txt)$/i.test(f.name)
+      ) {
+        return true;
+      }
+      return false;
+    });
+    if (validFiles.length === 0) {
+      setMediaError('Please select JPG, PNG, or WebP photo files.');
+      return;
+    }
 
     const incoming: GalleryPhoto[] = validFiles.slice(0, 50).map((file, i) => {
       const id = `photo-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
@@ -462,7 +502,7 @@ export default function App() {
         id,
         kind: 'photo',
         previewUrl: URL.createObjectURL(file),
-        name: file.name,
+        name: file.name || `Photo ${i + 1}`,
         isSample: false,
       };
     });
@@ -483,13 +523,16 @@ export default function App() {
     setTelegramSendStatus(null);
   };
 
-  const handleSetGreenScreenVideo = async (files: FileList) => {
+  const handleSetGreenScreenVideo = async (files: File[]) => {
     haptic('light');
     setMediaError(null);
-    const validFile = Array.from(files).find(
+    const validFile = files.find(
       (f) => f.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|3gp)$/i.test(f.name)
     );
-    if (!validFile) return;
+    if (!validFile) {
+      setMediaError('Please choose an MP4 or MOV green-screen video.');
+      return;
+    }
 
     setIsLoadingMedia(true);
     try {
@@ -529,13 +572,16 @@ export default function App() {
     }
   };
 
-  const handleAddVideos = async (files: FileList) => {
+  const handleAddVideos = async (files: File[]) => {
     haptic('light');
     setMediaError(null);
-    const validFiles = Array.from(files).filter(
+    const validFiles = files.filter(
       (f) => f.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|3gp)$/i.test(f.name)
     );
-    if (validFiles.length === 0) return;
+    if (validFiles.length === 0) {
+      setMediaError('Please choose an MP4 or MOV video file.');
+      return;
+    }
 
     setIsLoadingMedia(true);
     try {
@@ -1070,6 +1116,22 @@ export default function App() {
     );
   }
 
+  if (unlockTapLinkCode) {
+    return (
+      <TapLinkUnlockView
+        code={unlockTapLinkCode}
+        appConfig={appConfig}
+        onExitToApp={() => {
+          if (typeof window !== 'undefined' && window.location.pathname.startsWith('/l/')) {
+            window.history.pushState({}, '', '/');
+          }
+          setUnlockTapLinkCode('');
+          setView('templates');
+        }}
+      />
+    );
+  }
+
   const activeAdLabel = getActiveRewardAdLabel(appConfig);
   const isAnyAdOpen = isRunningAd || isRunningInterstitial;
 
@@ -1126,10 +1188,10 @@ export default function App() {
             )}
           </div>
 
-          {/* Zone 2: Clean 3-section Navigation (Templates | Edits | Editor) */}
+          {/* Zone 2: Clean 4-section Navigation (Templates | Edits | TapLinks | Editor) */}
           <nav
             aria-label="Workspace sections"
-            className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-400"
+            className="hidden md:flex items-center gap-7 text-sm font-medium text-zinc-400"
           >
             <button
               type="button"
@@ -1156,6 +1218,17 @@ export default function App() {
               }`}
             >
               Edits
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('taplinks')}
+              className={`py-1 whitespace-nowrap shrink-0 transition-colors ${
+                view === 'taplinks'
+                  ? 'text-white underline decoration-amber-400 decoration-2 underline-offset-8'
+                  : 'hover:text-white'
+              }`}
+            >
+              TapLinks
             </button>
             <button
               type="button"
@@ -1362,13 +1435,25 @@ export default function App() {
         />
       )}
 
-      {/* Mobile Bottom Navigation (Templates | Edits | Editor; hidden on Edit view so the Edit Tool Dock owns the thumb zone) */}
-      {(view === 'templates' || view === 'edits') && (
+      {/* VIEW 4: TAPLINKS AD-MONETIZED LINK SHORTENER */}
+      {view === 'taplinks' && (
+        <TapLinksView
+          appConfig={appConfig}
+          tgContext={tgContext}
+          onPreviewCode={(code) => {
+            haptic('light');
+            setUnlockTapLinkCode(code);
+          }}
+        />
+      )}
+
+      {/* Mobile Bottom Navigation (Templates | Edits | TapLinks | Editor; hidden on Edit view so the Edit Tool Dock owns the thumb zone) */}
+      {(view === 'templates' || view === 'edits' || view === 'taplinks') && (
         <nav
           aria-label="Mobile navigation"
           className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#08080A]/95 backdrop-blur-md border-t border-white/10 pb-safe"
         >
-          <div className="grid grid-cols-3 h-14">
+          <div className="grid grid-cols-4 h-14">
             <button
               type="button"
               onClick={() => {
@@ -1397,6 +1482,20 @@ export default function App() {
             >
               <Clapperboard className="w-5 h-5" />
               <span className="text-[11px] font-semibold">Edits</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                haptic('light');
+                setView('taplinks');
+              }}
+              className={`flex flex-col items-center justify-center gap-0.5 transition-colors ${
+                view === 'taplinks' ? 'text-amber-400' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Link2 className="w-5 h-5" />
+              <span className="text-[11px] font-semibold">TapLinks</span>
             </button>
 
             <button
